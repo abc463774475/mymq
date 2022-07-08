@@ -131,7 +131,6 @@ type ConnInfo struct {
 	Lang           string      `json:"lang,omitempty"`
 	Version        string      `json:"version,omitempty"`
 	TLSVersion     string      `json:"tls_version,omitempty"`
-	TLSCipher      string      `json:"tls_cipher_suite,omitempty"`
 	AuthorizedUser string      `json:"authorized_user,omitempty"`
 	Account        string      `json:"account,omitempty"`
 	Subs           []string    `json:"subscriptions_list,omitempty"`
@@ -547,7 +546,6 @@ func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 		conn := nc.(*tls.Conn)
 		cs := conn.ConnectionState()
 		ci.TLSVersion = tlsVersion(cs.Version)
-		ci.TLSCipher = tlsCipher(cs.CipherSuite)
 	}
 
 	if client.port != 0 {

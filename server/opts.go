@@ -406,9 +406,8 @@ type TLSConfigOpts struct {
 	TLSCheckKnownURLs bool
 	Timeout           float64
 	RateLimit         int64
-	Ciphers           []uint16
-	CurvePreferences  []tls.CurveID
-	PinnedCerts       PinnedCertSet
+
+	PinnedCerts PinnedCertSet
 }
 
 // OCSPConfig represents the options of OCSP stapling options.
@@ -3185,32 +3184,8 @@ func checkPermSubjectArray(sa []string) error {
 
 // PrintTLSHelpAndDie prints TLS usage and exits.
 func PrintTLSHelpAndDie() {
-	fmt.Printf("%s", tlsUsage)
-	for k := range cipherMap {
-		fmt.Printf("    %s\n", k)
-	}
-	fmt.Printf("\nAvailable curve preferences include:\n")
-	for k := range curvePreferenceMap {
-		fmt.Printf("    %s\n", k)
-	}
+
 	os.Exit(0)
-}
-
-func parseCipher(cipherName string) (uint16, error) {
-	cipher, exists := cipherMap[cipherName]
-	if !exists {
-		return 0, fmt.Errorf("unrecognized cipher %s", cipherName)
-	}
-
-	return cipher, nil
-}
-
-func parseCurvePreferences(curveName string) (tls.CurveID, error) {
-	curve, exists := curvePreferenceMap[curveName]
-	if !exists {
-		return 0, fmt.Errorf("unrecognized curve preference %s", curveName)
-	}
-	return curve, nil
 }
 
 // Helper function to parse TLS configs.
@@ -3278,34 +3253,7 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				tc.Verify = verify
 			}
 			tc.TLSCheckKnownURLs = verify
-		case "cipher_suites":
-			ra := mv.([]interface{})
-			if len(ra) == 0 {
-				return nil, &configErr{tk, "error parsing tls config, 'cipher_suites' cannot be empty"}
-			}
-			tc.Ciphers = make([]uint16, 0, len(ra))
-			for _, r := range ra {
-				tk, r := unwrapValue(r, &lt)
-				cipher, err := parseCipher(r.(string))
-				if err != nil {
-					return nil, &configErr{tk, err.Error()}
-				}
-				tc.Ciphers = append(tc.Ciphers, cipher)
-			}
-		case "curve_preferences":
-			ra := mv.([]interface{})
-			if len(ra) == 0 {
-				return nil, &configErr{tk, "error parsing tls config, 'curve_preferences' cannot be empty"}
-			}
-			tc.CurvePreferences = make([]tls.CurveID, 0, len(ra))
-			for _, r := range ra {
-				tk, r := unwrapValue(r, &lt)
-				cps, err := parseCurvePreferences(r.(string))
-				if err != nil {
-					return nil, &configErr{tk, err.Error()}
-				}
-				tc.CurvePreferences = append(tc.CurvePreferences, cps)
-			}
+
 		case "timeout":
 			at := float64(0)
 			switch mv := mv.(type) {
@@ -3353,16 +3301,6 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 		default:
 			return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, unknown field [%q]", mk)}
 		}
-	}
-
-	// If cipher suites were not specified then use the defaults
-	if tc.Ciphers == nil {
-		tc.Ciphers = defaultCipherSuites()
-	}
-
-	// If curve preferences were not specified, then use the defaults
-	if tc.CurvePreferences == nil {
-		tc.CurvePreferences = defaultCurvePreferences()
 	}
 
 	return &tc, nil
@@ -3444,9 +3382,7 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	// FIXME(dlc) change if ARM based.
 	config := tls.Config{
 		MinVersion:               tls.VersionTLS12,
-		CipherSuites:             tc.Ciphers,
 		PreferServerCipherSuites: true,
-		CurvePreferences:         tc.CurvePreferences,
 		InsecureSkipVerify:       tc.Insecure,
 	}
 
@@ -4089,7 +4025,6 @@ func overrideTLS(opts *Options) error {
 	tc.KeyFile = opts.TLSKey
 	tc.CaFile = opts.TLSCaCert
 	tc.Verify = opts.TLSVerify
-	tc.Ciphers = defaultCipherSuites()
 
 	var err error
 	opts.TLSConfig, err = GenTLSConfig(&tc)

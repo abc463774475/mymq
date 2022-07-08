@@ -1307,7 +1307,7 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	if tlsRequired {
 		c.Debugf("TLS handshake complete")
 		cs := c.nc.(*tls.Conn).ConnectionState()
-		c.Debugf("TLS version %s, cipher suite %s", tlsVersion(cs.Version), tlsCipher(cs.CipherSuite))
+		c.Debugf("TLS version %s,", tlsVersion(cs.Version))
 	}
 
 	// Queue Connect proto if we solicited the connection.
