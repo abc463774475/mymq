@@ -61,10 +61,6 @@ const (
 	NON_CLIENT = iota
 	// Regular NATS client.
 	NATS
-	// MQTT client.
-	MQTT
-	// Websocket client.
-	WS
 )
 
 const (
@@ -261,8 +257,6 @@ type client struct {
 	route *route
 	gw    *gateway
 	leaf  *leaf
-	ws    *websocket
-	mqtt  *mqtt
 
 	flags clientFlag // Compact booleans into a single field. Size will be increased when needed.
 
@@ -475,7 +469,7 @@ func (c *client) GetTLSConnectionState() *tls.ConnectionState {
 }
 
 // For CLIENT connections, this function returns the client type, that is,
-// NATS (for regular clients), MQTT or WS for websocket.
+// NATS (for regular clients),
 // If this is invoked for a non CLIENT connection, NON_CLIENT is returned.
 //
 // This function does not lock the client and accesses fields that are supposed
@@ -483,11 +477,6 @@ func (c *client) GetTLSConnectionState() *tls.ConnectionState {
 func (c *client) clientType() int {
 	switch c.kind {
 	case CLIENT:
-		if c.isMqtt() {
-			return MQTT
-		} else if c.isWebsocket() {
-			return WS
-		}
 		return NATS
 	default:
 		return NON_CLIENT
@@ -497,8 +486,6 @@ func (c *client) clientType() int {
 var clientTypeStringMap = map[int]string{
 	NON_CLIENT: _EMPTY_,
 	NATS:       "nats",
-	WS:         "websocket",
-	MQTT:       "mqtt",
 }
 
 func (c *client) clientTypeString() string {
@@ -527,7 +514,6 @@ type subscription struct {
 	max     int64
 	qw      int32
 	closed  int32
-	mqtt    *mqttSub
 }
 
 // Indicate that this subscription is closed.
@@ -621,15 +607,7 @@ func (c *client) initClient() {
 				host, port, _ := net.SplitHostPort(conn)
 				iPort, _ := strconv.Atoi(port)
 				c.host, c.port = host, uint16(iPort)
-				if c.isWebsocket() && c.ws.clientIP != _EMPTY_ {
-					cip := c.ws.clientIP
-					// Surround IPv6 addresses with square brackets, as
-					// net.JoinHostPort would do...
-					if strings.Contains(cip, ":") {
-						cip = "[" + cip + "]"
-					}
-					conn = fmt.Sprintf("%s/%s", cip, conn)
-				}
+
 				// Now that we have extracted host and port, escape
 				// the string because it is going to be used in Sprintf
 				conn = strings.ReplaceAll(conn, "%", "%%")
@@ -642,14 +620,6 @@ func (c *client) initClient() {
 		switch c.clientType() {
 		case NATS:
 			c.ncs.Store(fmt.Sprintf("%s - cid:%d", conn, c.cid))
-		case WS:
-			c.ncs.Store(fmt.Sprintf("%s - wid:%d", conn, c.cid))
-		case MQTT:
-			var ws string
-			if c.isWebsocket() {
-				ws = "_ws"
-			}
-			c.ncs.Store(fmt.Sprintf("%s - mid%s:%d", conn, ws, c.cid))
 		}
 	case ROUTER:
 		c.ncs.Store(fmt.Sprintf("%s - rid:%d", conn, c.cid))
@@ -657,9 +627,6 @@ func (c *client) initClient() {
 		c.ncs.Store(fmt.Sprintf("%s - gid:%d", conn, c.cid))
 	case LEAF:
 		var ws string
-		if c.isWebsocket() {
-			ws = "_ws"
-		}
 		c.ncs.Store(fmt.Sprintf("%s - lid%s:%d", conn, ws, c.cid))
 	case SYSTEM:
 		c.ncs.Store("SYSTEM")
@@ -1142,10 +1109,7 @@ func (c *client) readLoop(pre []byte) {
 		return
 	}
 	nc := c.nc
-	ws := c.isWebsocket()
-	if c.isMqtt() {
-		c.mqtt.r = &mqttReader{reader: nc}
-	}
+
 	c.in.rsz = startBufSize
 
 	// Check the per-account-cache for closed subscriptions
@@ -1153,16 +1117,10 @@ func (c *client) readLoop(pre []byte) {
 	// Last per-account-cache check for closed subscriptions
 	lpacc := time.Now()
 	acc := c.acc
-	var masking bool
-	if ws {
-		masking = c.ws.maskread
-	}
+
 	c.mu.Unlock()
 
 	defer func() {
-		if c.isMqtt() {
-			s.mqttHandleClosedClient(c)
-		}
 		// These are used only in the readloop, so we can set them to nil
 		// on exit of the readLoop.
 		c.in.results, c.in.pacache = nil, nil
@@ -1171,18 +1129,10 @@ func (c *client) readLoop(pre []byte) {
 	// Start read buffer.
 	b := make([]byte, c.in.rsz)
 
-	// Websocket clients will return several slices if there are multiple
-	// websocket frames in the blind read. For non WS clients though, we
 	// will always have 1 slice per loop iteration. So we define this here
 	// so non WS clients will use bufs[0] = b[:n].
 	var _bufs [1][]byte
 	bufs := _bufs[:1]
-
-	var wsr *wsReadInfo
-	if ws {
-		wsr = &wsReadInfo{mask: masking}
-		wsr.init()
-	}
 
 	for {
 		var n int
@@ -1201,17 +1151,7 @@ func (c *client) readLoop(pre []byte) {
 				return
 			}
 		}
-		if ws {
-			bufs, err = c.wsRead(wsr, nc, b[:n])
-			if bufs == nil && err != nil {
-				if err != io.EOF {
-					c.Errorf("read error: %v", err)
-				}
-				c.closeConnection(closedStateForErr(err))
-			} else if bufs == nil {
-				continue
-			}
-		} else {
+		{
 			bufs[0] = b[:n]
 		}
 
@@ -1341,9 +1281,6 @@ func closedStateForErr(err error) ClosedState {
 // collapsePtoNB will place primary onto nb buffer as needed in prep for WriteTo.
 // This will return a copy on purpose.
 func (c *client) collapsePtoNB() (net.Buffers, int64) {
-	if c.isWebsocket() {
-		return c.wsCollapsePtoNB()
-	}
 	if c.out.p != nil {
 		p := c.out.p
 		c.out.p = nil
@@ -1355,10 +1292,6 @@ func (c *client) collapsePtoNB() (net.Buffers, int64) {
 // This will handle the fixup needed on a partial write.
 // Assume pending has been already calculated correctly.
 func (c *client) handlePartialWrite(pnb net.Buffers) {
-	if c.isWebsocket() {
-		c.ws.frames = append(pnb, c.ws.frames...)
-		return
-	}
 	nb, _ := c.collapsePtoNB()
 	// The partial needs to be first, so append nb to pnb
 	c.out.nb = append(pnb, nb...)
@@ -1449,9 +1382,7 @@ func (c *client) flushOutbound() bool {
 
 	// Subtract from pending bytes and messages.
 	c.out.pb -= n
-	if c.isWebsocket() {
-		c.ws.fs -= n
-	}
+
 	c.out.pm -= apm // FIXME(dlc) - this will not be totally accurate on partials.
 
 	// Check for partial writes
@@ -1559,21 +1490,17 @@ func (c *client) markConnAsClosed(reason ClosedState) {
 	// the flushOutbound() gets a write error. If that happens, connection
 	// being lost, there is no reason to attempt to flush again during the
 	// teardown when the writeLoop exits.
-	var skipFlush bool
+	//var skipFlush bool
 	switch reason {
 	case ReadError, WriteError, SlowConsumerPendingBytes, SlowConsumerWriteDeadline, TLSHandshakeError:
 		c.flags.set(skipFlushOnClose)
-		skipFlush = true
+		//skipFlush = true
 	}
 	if c.flags.isSet(connMarkedClosed) {
 		return
 	}
 	c.flags.set(connMarkedClosed)
-	// For a websocket client, unless we are told not to flush, enqueue
-	// a websocket CloseMessage based on the reason.
-	if !skipFlush && c.isWebsocket() && !c.ws.closeSent {
-		c.wsEnqueueCloseMessage(reason)
-	}
+
 	// Be consistent with the creation: for routes, gateways and leaf,
 	// we use Noticef on create, so use that too for delete.
 	if c.srv != nil {
@@ -1805,10 +1732,6 @@ func (c *client) processConnect(arg []byte) error {
 		}
 	}
 
-	// If websocket client and JWT not in the CONNECT, use the cookie JWT (possibly empty).
-	if ws := c.ws; ws != nil && c.opts.JWT == "" {
-		c.opts.JWT = ws.cookieJwt
-	}
 	// when not in operator mode, discard the jwt
 	if srv != nil && srv.trustedKeys == nil {
 		c.opts.JWT = _EMPTY_
@@ -1947,9 +1870,7 @@ func (c *client) authViolation() {
 	} else {
 		c.Errorf(ErrAuthentication.Error())
 	}
-	if c.isMqtt() {
-		c.mqttEnqueueConnAck(mqttConnAckRCNotAuthorized, false)
-	} else {
+	{
 		c.sendErr("Authorization Violation")
 	}
 	c.closeConnection(AuthenticationViolation)
@@ -2031,7 +1952,7 @@ func (c *client) queueOutbound(data []byte) {
 			c.out.nb = append(c.out.nb, c.out.p)
 			c.out.p = nil
 		}
-		// TODO: It was found with LeafNode and Websocket that referencing
+		// TODO: It was found with LeafNode
 		// the data buffer when > maxBufSize would cause corruption
 		// (reproduced with small maxBufSize=10 and TestLeafNodeWSNoBufferCorruption).
 		// So always make a copy for now.
@@ -2109,9 +2030,6 @@ func (c *client) sendRTTPing() bool {
 // the c.rtt is 0 and wants to force an update by sending a PING.
 // Client lock held on entry.
 func (c *client) sendRTTPingLocked() bool {
-	if c.isMqtt() {
-		return false
-	}
 	// Most client libs send a CONNECT+PING and wait for a PONG from the
 	// server. So if firstPongSent flag is set, it is ok for server to
 	// send the PING. But in case we have client libs that don't do that,
@@ -2142,10 +2060,7 @@ func (c *client) generateClientInfoJSON(info Info) []byte {
 	info.CID = c.cid
 	info.ClientIP = c.host
 	info.MaxPayload = c.mpay
-	if c.isWebsocket() {
-		info.ClientConnectURLs = info.WSConnectURLs
-	}
-	info.WSConnectURLs = nil
+
 	// Generate the info json
 	b, _ := json.Marshal(info)
 	pcs := [][]byte{[]byte("INFO"), b, []byte(CR_LF)}
@@ -2156,9 +2071,6 @@ func (c *client) sendErr(err string) {
 	c.mu.Lock()
 	if c.trace {
 		c.traceOutOp("-ERR", []byte(err))
-	}
-	if !c.isMqtt() {
-		c.enqueueProto([]byte(fmt.Sprintf(errProto, err)))
 	}
 	c.mu.Unlock()
 }
@@ -3167,11 +3079,6 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 
 	// The msg includes the CR_LF, so pull back out for accounting.
 	msgSize := int64(len(msg))
-	prodIsMQTT := c.isMqtt()
-	// MQTT producers send messages without CR_LF, so don't remove it for them.
-	if !prodIsMQTT {
-		msgSize -= int64(LEN_CR_LF)
-	}
 
 	// No atomic needed since accessed under client lock.
 	// Monitor is reading those also under client's lock.
@@ -3249,10 +3156,6 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 	// Queue to outbound buffer
 	client.queueOutbound(mh)
 	client.queueOutbound(msg)
-	if prodIsMQTT {
-		// Need to add CR_LF since MQTT producers don't send CR_LF
-		client.queueOutbound([]byte(CR_LF))
-	}
 
 	client.out.pm++
 
@@ -3565,11 +3468,6 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 		c.sendOK()
 	}
 
-	// If MQTT client, check for retain flag now that we have passed permissions check
-	if c.isMqtt() {
-		c.mqttHandlePubRetain()
-	}
-
 	// Doing this inline as opposed to create a function (which otherwise has a measured
 	// performance impact reported in our bench)
 	var isGWRouted bool
@@ -3801,10 +3699,7 @@ func (c *client) setHeader(key, value string, msg []byte) []byte {
 	// FIXME(dlc) - This is inefficient.
 	bb.Write(msg[omi:])
 	nsize := bb.Len() - LEN_CR_LF
-	// MQTT producers don't have CRLF, so add it back.
-	if c.isMqtt() {
-		nsize += LEN_CR_LF
-	}
+
 	// Update pubArgs
 	// If others will use this later we need to save and restore original.
 	c.pa.hdr = nhdr
@@ -4782,7 +4677,6 @@ func (c *client) closeConnection(reason ClosedState) {
 
 	if c.route != nil {
 		connectURLs = c.route.connectURLs
-		wsConnectURLs = c.route.wsConnURLs
 	}
 
 	// If we have remote latency tracking running shut that down.
@@ -5280,9 +5174,8 @@ func convertAllowedConnectionTypes(cts []string) (map[string]struct{}, error) {
 	for _, i := range cts {
 		i = strings.ToUpper(i)
 		switch i {
-		case jwt.ConnectionTypeStandard, jwt.ConnectionTypeWebsocket,
-			jwt.ConnectionTypeLeafnode, jwt.ConnectionTypeLeafnodeWS,
-			jwt.ConnectionTypeMqtt, jwt.ConnectionTypeMqttWS:
+		case jwt.ConnectionTypeStandard,
+			jwt.ConnectionTypeLeafnode:
 			m[i] = struct{}{}
 		default:
 			unknown = append(unknown, i)
@@ -5298,7 +5191,7 @@ func convertAllowedConnectionTypes(cts []string) (map[string]struct{}, error) {
 
 // This will return true if the connection is of a type present in the given `acts` map.
 // Note that so far this is used only for CLIENT or LEAF connections.
-// But a CLIENT can be standard or websocket (and other types in the future).
+// But a CLIENT can be standard or
 func (c *client) connectionTypeAllowed(acts map[string]struct{}) bool {
 	// Empty means all type of clients are allowed
 	if len(acts) == 0 {
@@ -5310,19 +5203,9 @@ func (c *client) connectionTypeAllowed(acts map[string]struct{}) bool {
 		switch c.clientType() {
 		case NATS:
 			want = jwt.ConnectionTypeStandard
-		case WS:
-			want = jwt.ConnectionTypeWebsocket
-		case MQTT:
-			if c.isWebsocket() {
-				want = jwt.ConnectionTypeMqttWS
-			} else {
-				want = jwt.ConnectionTypeMqtt
-			}
 		}
 	case LEAF:
-		if c.isWebsocket() {
-			want = jwt.ConnectionTypeLeafnodeWS
-		} else {
+		{
 			want = jwt.ConnectionTypeLeafnode
 		}
 	}

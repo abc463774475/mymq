@@ -3116,9 +3116,7 @@ func (s *Server) trackGWReply(c *client, acc *Account, reply, routedReply []byte
 	}
 	// The reason we pass both `reply` and `routedReply`, is that in some cases,
 	// `routedReply` may have a deliver subject appended, something look like:
-	// "_GR_.xxx.yyy.$JS.ACK.$MQTT_msgs.someid.1.1.1.1620086713306484000.0@$MQTT.msgs.foo"
 	// but `reply` has already been cleaned up (delivery subject removed from tail):
-	// "$JS.ACK.$MQTT_msgs.someid.1.1.1.1620086713306484000.0"
 	// So we will use that knowledge so we don't have to make any cleaning here.
 	routedReply = routedReply[:gwSubjectOffset+len(reply)]
 	// We need to make a copy so that we don't reference the underlying

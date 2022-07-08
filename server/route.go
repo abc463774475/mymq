@@ -77,12 +77,12 @@ type route struct {
 	tlsRequired  bool
 	jetstream    bool
 	connectURLs  []string
-	wsConnURLs   []string
-	replySubs    map[*subscription]*time.Timer
-	gatewayURL   string
-	leafnodeURL  string
-	hash         string
-	idHash       string
+
+	replySubs   map[*subscription]*time.Timer
+	gatewayURL  string
+	leafnodeURL string
+	hash        string
+	idHash      string
 }
 
 type connectInfo struct {
@@ -555,12 +555,10 @@ func (c *client) processRouteInfo(info *Info) {
 		}
 
 		var connectURLs []string
-		var wsConnectURLs []string
 
 		// If we are notified that the remote is going into LDM mode, capture route's connectURLs.
 		if info.LameDuckMode {
 			connectURLs = c.route.connectURLs
-			wsConnectURLs = c.route.wsConnURLs
 		} else {
 			// If this is an update due to config reload on the remote server,
 			// need to possibly send local subs to the remote server.
@@ -571,8 +569,8 @@ func (c *client) processRouteInfo(info *Info) {
 		// If the remote is going into LDM and there are client connect URLs
 		// associated with this route and we are allowed to advertise, remove
 		// those URLs and update our clients.
-		if (len(connectURLs) > 0 || len(wsConnectURLs) > 0) && !s.getOpts().Cluster.NoAdvertise {
-			s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
+		if (len(connectURLs) > 0) && !s.getOpts().Cluster.NoAdvertise {
+			//s.removeConnectURLsAndSendINFOToClients(connectURLs, wsConnectURLs)
 		}
 		return
 	}
@@ -672,7 +670,7 @@ func (c *client) processRouteInfo(info *Info) {
 		// Unless disabled, possibly update the server's INFO protocol
 		// and send to clients that know how to handle async INFOs.
 		if !s.getOpts().Cluster.NoAdvertise {
-			s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs, info.WSConnectURLs)
+			// s.addConnectURLsAndSendINFOToClients(info.ClientConnectURLs, info.WSConnectURLs)
 		}
 		// Add the remote's leafnodeURL to our list of URLs and send the update
 		// to all LN connections. (Note that when coming from a route, LeafNodeURLs
@@ -740,7 +738,7 @@ func (s *Server) sendAsyncInfoToClients(regCli, wsCli bool) {
 		// registered (server has received CONNECT and first PING). For
 		// clients that are not at this stage, this will happen in the
 		// processing of the first PING (see client.processPing)
-		if ((regCli && !c.isWebsocket()) || (wsCli && c.isWebsocket())) &&
+		if ((regCli) || (wsCli)) &&
 			c.opts.Protocol >= ClientProtoInfo &&
 			c.flags.isSet(firstPongSent) {
 			// sendInfo takes care of checking if the connection is still
@@ -1424,7 +1422,6 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 		}
 		c.mu.Lock()
 		c.route.connectURLs = info.ClientConnectURLs
-		c.route.wsConnURLs = info.WSConnectURLs
 		cid := c.cid
 		hash := c.route.hash
 		idHash := c.route.idHash
@@ -1471,7 +1468,6 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 			// If we upgrade to solicited, we still want to keep the remote's
 			// connectURLs. So transfer those.
 			r.connectURLs = remote.route.connectURLs
-			r.wsConnURLs = remote.route.wsConnURLs
 			remote.route = r
 		}
 		// This is to mitigate the issue where both sides add the route
@@ -1699,7 +1695,6 @@ func (s *Server) startRouteAcceptLoop() {
 	// Set this if only if advertise is not disabled
 	if !opts.Cluster.NoAdvertise {
 		info.ClientConnectURLs = s.clientConnectURLs
-		info.WSConnectURLs = s.websocket.connectURLs
 	}
 	// If we have selected a random port...
 	if port == 0 {

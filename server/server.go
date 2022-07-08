@@ -81,9 +81,9 @@ type Info struct {
 	Cluster           string   `json:"cluster,omitempty"`
 	Dynamic           bool     `json:"cluster_dynamic,omitempty"`
 	Domain            string   `json:"domain,omitempty"`
-	ClientConnectURLs []string `json:"connect_urls,omitempty"`    // Contains URLs a client can connect to.
-	WSConnectURLs     []string `json:"ws_connect_urls,omitempty"` // Contains URLs a ws client can connect to.
-	LameDuckMode      bool     `json:"ldm,omitempty"`
+	ClientConnectURLs []string `json:"connect_urls,omitempty"` // Contains URLs a client can connect to.
+
+	LameDuckMode bool `json:"ldm,omitempty"`
 
 	// Route Specific
 	Import        *SubjectPermission `json:"import,omitempty"`
@@ -236,12 +236,6 @@ type Server struct {
 
 	// For eventIDs
 	eventIds *nuid.NUID
-
-	// Websocket structure
-	websocket srvWebsocket
-
-	// MQTT structure
-	mqtt srvMQTT
 
 	// OCSP monitoring
 	ocsps []*OCSPMonitor
@@ -447,7 +441,6 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// Used internally for quick look-ups.
 	s.clientConnectURLsMap = make(refCountedUrlSet)
-	s.websocket.connectURLsMap = make(refCountedUrlSet)
 	s.leafURLsMap = make(refCountedUrlSet)
 
 	// Ensure that non-exported options (used in tests) are properly set.
@@ -708,14 +701,12 @@ func validateOptions(o *Options) error {
 	if err := validateCluster(o); err != nil {
 		return err
 	}
-	if err := validateMQTTOptions(o); err != nil {
-		return err
-	}
+
 	if err := validateJetStreamOptions(o); err != nil {
 		return err
 	}
-	// Finally check websocket options.
-	return validateWebsocketOptions(o)
+
+	return nil
 }
 
 func (s *Server) getOpts() *Options {
@@ -1802,13 +1793,6 @@ func (s *Server) Start() {
 		s.startGateways()
 	}
 
-	// Start websocket server if needed. Do this before starting the routes, and
-	// leaf node because we want to resolve the gateway host:port so that this
-	// information can be sent to other routes.
-	if opts.Websocket.Port != 0 {
-		s.startWebsocketServer()
-	}
-
 	// Start up listen if we want to accept leaf node connections.
 	if opts.LeafNode.Port != 0 {
 		// Will resolve or assign the advertise address for the leafnode listener.
@@ -1833,11 +1817,6 @@ func (s *Server) Start() {
 	// The Routing routine needs to wait for the client listen
 	// port to be opened and potential ephemeral port selected.
 	clientListenReady := make(chan struct{})
-
-	// MQTT
-	if opts.MQTT.Port != 0 {
-		s.startMQTT()
-	}
 
 	// Start up routing as well if needed.
 	if opts.Cluster.Port != 0 {
@@ -1942,21 +1921,6 @@ func (s *Server) Shutdown() {
 		doneExpected++
 		s.listener.Close()
 		s.listener = nil
-	}
-
-	// Kick websocket server
-	if s.websocket.server != nil {
-		doneExpected++
-		s.websocket.server.Close()
-		s.websocket.server = nil
-		s.websocket.listener = nil
-	}
-
-	// Kick MQTT accept loop
-	if s.mqtt.listener != nil {
-		doneExpected++
-		s.mqtt.listener.Close()
-		s.mqtt.listener = nil
 	}
 
 	// Kick leafnodes AcceptLoop()
@@ -2444,9 +2408,7 @@ func (s *Server) copyInfo() Info {
 	if len(info.ClientConnectURLs) > 0 {
 		info.ClientConnectURLs = append([]string(nil), s.info.ClientConnectURLs...)
 	}
-	if len(info.WSConnectURLs) > 0 {
-		info.WSConnectURLs = append([]string(nil), s.info.WSConnectURLs...)
-	}
+
 	return info
 }
 
@@ -2677,21 +2639,21 @@ func (s *Server) saveClosedClient(c *client, nc net.Conn, reason ClosedState) {
 	s.mu.Unlock()
 }
 
-// Adds to the list of client and websocket clients connect URLs.
+// Adds to the list of client and
 // If there was a change, an INFO protocol is sent to registered clients
 // that support async INFO protocols.
 func (s *Server) addConnectURLsAndSendINFOToClients(curls, wsurls []string) {
 	s.updateServerINFOAndSendINFOToClients(curls, wsurls, true)
 }
 
-// Removes from the list of client and websocket clients connect URLs.
+// Removes from the list of client
 // If there was a change, an INFO protocol is sent to registered clients
 // that support async INFO protocols.
 func (s *Server) removeConnectURLsAndSendINFOToClients(curls, wsurls []string) {
 	s.updateServerINFOAndSendINFOToClients(curls, wsurls, false)
 }
 
-// Updates the list of client and websocket clients connect URLs and if any change
+// Updates the list of client and
 // sends an async INFO update to clients that support it.
 func (s *Server) updateServerINFOAndSendINFOToClients(curls, wsurls []string, add bool) {
 	s.mu.Lock()
@@ -2711,7 +2673,6 @@ func (s *Server) updateServerINFOAndSendINFOToClients(curls, wsurls []string, ad
 		return wasUpdated
 	}
 	cliUpdated := updateMap(curls, s.clientConnectURLsMap)
-	wsUpdated := updateMap(wsurls, s.websocket.connectURLsMap)
 
 	updateInfo := func(infoURLs *[]string, urls []string, m refCountedUrlSet) {
 		// Recreate the info's slice from the map
@@ -2726,14 +2687,11 @@ func (s *Server) updateServerINFOAndSendINFOToClients(curls, wsurls []string, ad
 	if cliUpdated {
 		updateInfo(&s.info.ClientConnectURLs, s.clientConnectURLs, s.clientConnectURLsMap)
 	}
-	if wsUpdated {
-		updateInfo(&s.info.WSConnectURLs, s.websocket.connectURLs, s.websocket.connectURLsMap)
-	}
-	if cliUpdated || wsUpdated {
+
+	if cliUpdated {
 		// Update the time of this update
 		s.lastCURLsUpdate = time.Now().UnixNano()
-		// Send to all registered clients that support async INFO protocols.
-		s.sendAsyncInfoToClients(cliUpdated, wsUpdated)
+
 	}
 }
 
@@ -2965,8 +2923,7 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		chk["route"] = info{ok: (opts.Cluster.Port == 0 || s.routeListener != nil), err: s.routeListenerErr}
 		chk["gateway"] = info{ok: (opts.Gateway.Name == _EMPTY_ || s.gatewayListener != nil), err: s.gatewayListenerErr}
 		chk["leafNode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
-		chk["websocket"] = info{ok: (opts.Websocket.Port == 0 || s.websocket.listener != nil), err: s.websocket.listenerErr}
-		chk["mqtt"] = info{ok: (opts.MQTT.Port == 0 || s.mqtt.listener != nil), err: s.mqtt.listenerErr}
+
 		s.mu.RUnlock()
 
 		var numOK int
@@ -3214,7 +3171,6 @@ type Ports struct {
 	Monitoring []string `json:"monitoring,omitempty"`
 	Cluster    []string `json:"cluster,omitempty"`
 	Profile    []string `json:"profile,omitempty"`
-	WebSocket  []string `json:"websocket,omitempty"`
 }
 
 // PortsInfo attempts to resolve all the ports. If after maxWait the ports are not
@@ -3230,8 +3186,7 @@ func (s *Server) PortsInfo(maxWait time.Duration) *Ports {
 		httpListener := s.http
 		clusterListener := s.routeListener
 		profileListener := s.profiler
-		wsListener := s.websocket.listener
-		wss := s.websocket.tls
+
 		s.mu.RUnlock()
 
 		ports := Ports{}
@@ -3262,14 +3217,6 @@ func (s *Server) PortsInfo(maxWait time.Duration) *Ports {
 
 		if profileListener != nil {
 			ports.Profile = formatURL("http", profileListener)
-		}
-
-		if wsListener != nil {
-			protocol := wsSchemePrefix
-			if wss {
-				protocol = wsSchemePrefixTLS
-			}
-			ports.WebSocket = formatURL(protocol, wsListener)
 		}
 
 		return &ports
@@ -3375,9 +3322,7 @@ func (s *Server) serviceListeners() []net.Listener {
 	if opts.ProfPort != 0 {
 		listeners = append(listeners, s.profiler)
 	}
-	if opts.Websocket.Port != 0 {
-		listeners = append(listeners, s.websocket.listener)
-	}
+
 	return listeners
 }
 
@@ -3402,12 +3347,7 @@ func (s *Server) lameDuckMode() {
 	expected := 1
 	s.listener.Close()
 	s.listener = nil
-	if s.websocket.server != nil {
-		expected++
-		s.websocket.server.Close()
-		s.websocket.server = nil
-		s.websocket.listener = nil
-	}
+
 	s.ldmCh = make(chan bool, expected)
 	opts := s.getOpts()
 	gp := opts.LameDuckGracePeriod
@@ -3534,19 +3474,14 @@ func (s *Server) sendLDMToClients() {
 	s.info.LameDuckMode = true
 	// Clear this so that if there are further updates, we don't send our URLs.
 	s.clientConnectURLs = s.clientConnectURLs[:0]
-	if s.websocket.connectURLs != nil {
-		s.websocket.connectURLs = s.websocket.connectURLs[:0]
-	}
+
 	// Reset content first.
 	s.info.ClientConnectURLs = s.info.ClientConnectURLs[:0]
-	s.info.WSConnectURLs = s.info.WSConnectURLs[:0]
+
 	// Only add the other nodes if we are allowed to.
 	if !s.getOpts().Cluster.NoAdvertise {
 		for url := range s.clientConnectURLsMap {
 			s.info.ClientConnectURLs = append(s.info.ClientConnectURLs, url)
-		}
-		for url := range s.websocket.connectURLsMap {
-			s.info.WSConnectURLs = append(s.info.WSConnectURLs, url)
 		}
 	}
 	// Send to all registered clients that support async INFO protocols.

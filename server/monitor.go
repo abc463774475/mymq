@@ -76,9 +76,6 @@ type ConnzOptions struct {
 	// Filter for this explicit client connection.
 	CID uint64 `json:"cid"`
 
-	// Filter for this explicit client connection based on the MQTT client ID
-	MQTTClient string `json:"mqtt_client"`
-
 	// Filter by connection state.
 	State ConnState `json:"state"`
 
@@ -143,7 +140,6 @@ type ConnInfo struct {
 	IssuerKey      string      `json:"issuer_key,omitempty"`
 	NameTag        string      `json:"name_tag,omitempty"`
 	Tags           jwt.TagList `json:"tags,omitempty"`
-	MQTTClient     string      `json:"mqtt_client,omitempty"` // This is the MQTT client id
 }
 
 // DefaultConnListSize is the default size of the connection list.
@@ -185,7 +181,6 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		acc     string
 		a       *Account
 		filter  string
-		mqttCID string
 	)
 
 	if opts != nil {
@@ -206,7 +201,6 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		}
 		user = opts.User
 		acc = opts.Account
-		mqttCID = opts.MQTTClient
 
 		subs = opts.Subscriptions
 		subsDet = opts.SubscriptionsDetail
@@ -363,10 +357,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 				if user != _EMPTY_ && client.opts.Username != user {
 					continue
 				}
-				// Do mqtt client ID filtering next
-				if mqttCID != _EMPTY_ && client.getMQTTClientID() != mqttCID {
-					continue
-				}
+
 				openClients = append(openClients, client)
 			}
 		}
@@ -440,10 +431,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		if user != _EMPTY_ && cc.user != user {
 			continue
 		}
-		// Do mqtt client ID filtering next
-		if mqttCID != _EMPTY_ && cc.MQTTClient != mqttCID {
-			continue
-		}
+
 		// Copy if needed for any changes to the ConnInfo
 		if needCopy {
 			cx := *cc
@@ -533,7 +521,6 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 // client should be locked.
 func (ci *ConnInfo) fill(client *client, nc net.Conn, now time.Time) {
 	ci.Cid = client.cid
-	ci.MQTTClient = client.getMQTTClientID()
 	ci.Kind = client.kindString()
 	ci.Type = client.clientTypeString()
 	ci.Start = client.start
@@ -688,7 +675,6 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 
 	user := r.URL.Query().Get("user")
 	acc := r.URL.Query().Get("acc")
-	mqttCID := r.URL.Query().Get("mqtt_client")
 
 	connzOpts := &ConnzOptions{
 		Sort:                sortOpt,
@@ -698,7 +684,6 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 		Offset:              offset,
 		Limit:               limit,
 		CID:                 cid,
-		MQTTClient:          mqttCID,
 		State:               state,
 		User:                user,
 		Account:             acc,
@@ -1119,37 +1104,36 @@ func (s *Server) HandleIPQueuesz(w http.ResponseWriter, r *http.Request) {
 
 // Varz will output server information on the monitoring port at /varz.
 type Varz struct {
-	ID                    string                `json:"server_id"`
-	Name                  string                `json:"server_name"`
-	Version               string                `json:"version"`
-	Proto                 int                   `json:"proto"`
-	GitCommit             string                `json:"git_commit,omitempty"`
-	GoVersion             string                `json:"go"`
-	Host                  string                `json:"host"`
-	Port                  int                   `json:"port"`
-	AuthRequired          bool                  `json:"auth_required,omitempty"`
-	TLSRequired           bool                  `json:"tls_required,omitempty"`
-	TLSVerify             bool                  `json:"tls_verify,omitempty"`
-	IP                    string                `json:"ip,omitempty"`
-	ClientConnectURLs     []string              `json:"connect_urls,omitempty"`
-	WSConnectURLs         []string              `json:"ws_connect_urls,omitempty"`
-	MaxConn               int                   `json:"max_connections"`
-	MaxSubs               int                   `json:"max_subscriptions,omitempty"`
-	PingInterval          time.Duration         `json:"ping_interval"`
-	MaxPingsOut           int                   `json:"ping_max"`
-	HTTPHost              string                `json:"http_host"`
-	HTTPPort              int                   `json:"http_port"`
-	HTTPBasePath          string                `json:"http_base_path"`
-	HTTPSPort             int                   `json:"https_port"`
-	AuthTimeout           float64               `json:"auth_timeout"`
-	MaxControlLine        int32                 `json:"max_control_line"`
-	MaxPayload            int                   `json:"max_payload"`
-	MaxPending            int64                 `json:"max_pending"`
-	Cluster               ClusterOptsVarz       `json:"cluster,omitempty"`
-	Gateway               GatewayOptsVarz       `json:"gateway,omitempty"`
-	LeafNode              LeafNodeOptsVarz      `json:"leaf,omitempty"`
-	MQTT                  MQTTOptsVarz          `json:"mqtt,omitempty"`
-	Websocket             WebsocketOptsVarz     `json:"websocket,omitempty"`
+	ID                string           `json:"server_id"`
+	Name              string           `json:"server_name"`
+	Version           string           `json:"version"`
+	Proto             int              `json:"proto"`
+	GitCommit         string           `json:"git_commit,omitempty"`
+	GoVersion         string           `json:"go"`
+	Host              string           `json:"host"`
+	Port              int              `json:"port"`
+	AuthRequired      bool             `json:"auth_required,omitempty"`
+	TLSRequired       bool             `json:"tls_required,omitempty"`
+	TLSVerify         bool             `json:"tls_verify,omitempty"`
+	IP                string           `json:"ip,omitempty"`
+	ClientConnectURLs []string         `json:"connect_urls,omitempty"`
+	WSConnectURLs     []string         `json:"ws_connect_urls,omitempty"`
+	MaxConn           int              `json:"max_connections"`
+	MaxSubs           int              `json:"max_subscriptions,omitempty"`
+	PingInterval      time.Duration    `json:"ping_interval"`
+	MaxPingsOut       int              `json:"ping_max"`
+	HTTPHost          string           `json:"http_host"`
+	HTTPPort          int              `json:"http_port"`
+	HTTPBasePath      string           `json:"http_base_path"`
+	HTTPSPort         int              `json:"https_port"`
+	AuthTimeout       float64          `json:"auth_timeout"`
+	MaxControlLine    int32            `json:"max_control_line"`
+	MaxPayload        int              `json:"max_payload"`
+	MaxPending        int64            `json:"max_pending"`
+	Cluster           ClusterOptsVarz  `json:"cluster,omitempty"`
+	Gateway           GatewayOptsVarz  `json:"gateway,omitempty"`
+	LeafNode          LeafNodeOptsVarz `json:"leaf,omitempty"`
+
 	JetStream             JetStreamVarz         `json:"jetstream,omitempty"`
 	TLSTimeout            float64               `json:"tls_timeout"`
 	WriteDeadline         time.Duration         `json:"write_deadline"`
@@ -1244,37 +1228,6 @@ type RemoteLeafOptsVarz struct {
 	TLSTimeout   float64    `json:"tls_timeout,omitempty"`
 	URLs         []string   `json:"urls,omitempty"`
 	Deny         *DenyRules `json:"deny,omitempty"`
-}
-
-// MQTTOptsVarz contains monitoring MQTT information
-type MQTTOptsVarz struct {
-	Host           string        `json:"host,omitempty"`
-	Port           int           `json:"port,omitempty"`
-	NoAuthUser     string        `json:"no_auth_user,omitempty"`
-	AuthTimeout    float64       `json:"auth_timeout,omitempty"`
-	TLSMap         bool          `json:"tls_map,omitempty"`
-	TLSTimeout     float64       `json:"tls_timeout,omitempty"`
-	TLSPinnedCerts []string      `json:"tls_pinned_certs,omitempty"`
-	JsDomain       string        `json:"js_domain,omitempty"`
-	AckWait        time.Duration `json:"ack_wait,omitempty"`
-	MaxAckPending  uint16        `json:"max_ack_pending,omitempty"`
-}
-
-// WebsocketOptsVarz contains monitoring websocket information
-type WebsocketOptsVarz struct {
-	Host             string        `json:"host,omitempty"`
-	Port             int           `json:"port,omitempty"`
-	Advertise        string        `json:"advertise,omitempty"`
-	NoAuthUser       string        `json:"no_auth_user,omitempty"`
-	JWTCookie        string        `json:"jwt_cookie,omitempty"`
-	HandshakeTimeout time.Duration `json:"handshake_timeout,omitempty"`
-	AuthTimeout      float64       `json:"auth_timeout,omitempty"`
-	NoTLS            bool          `json:"no_tls,omitempty"`
-	TLSMap           bool          `json:"tls_map,omitempty"`
-	TLSPinnedCerts   []string      `json:"tls_pinned_certs,omitempty"`
-	SameOrigin       bool          `json:"same_origin,omitempty"`
-	AllowedOrigins   []string      `json:"allowed_origins,omitempty"`
-	Compression      bool          `json:"compression,omitempty"`
 }
 
 // VarzOptions are the options passed to Varz().
@@ -1420,8 +1373,6 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	c := &opts.Cluster
 	gw := &opts.Gateway
 	ln := &opts.LeafNode
-	mqtt := &opts.MQTT
-	ws := &opts.Websocket
 	clustTlsReq := c.TLSConfig != nil
 	gatewayTlsReq := gw.TLSConfig != nil
 	leafTlsReq := ln.TLSConfig != nil
@@ -1471,31 +1422,7 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			TLSVerify:   leafTlsVerify,
 			Remotes:     []RemoteLeafOptsVarz{},
 		},
-		MQTT: MQTTOptsVarz{
-			Host:          mqtt.Host,
-			Port:          mqtt.Port,
-			NoAuthUser:    mqtt.NoAuthUser,
-			AuthTimeout:   mqtt.AuthTimeout,
-			TLSMap:        mqtt.TLSMap,
-			TLSTimeout:    mqtt.TLSTimeout,
-			JsDomain:      mqtt.JsDomain,
-			AckWait:       mqtt.AckWait,
-			MaxAckPending: mqtt.MaxAckPending,
-		},
-		Websocket: WebsocketOptsVarz{
-			Host:             ws.Host,
-			Port:             ws.Port,
-			Advertise:        ws.Advertise,
-			NoAuthUser:       ws.NoAuthUser,
-			JWTCookie:        ws.JWTCookie,
-			AuthTimeout:      ws.AuthTimeout,
-			NoTLS:            ws.NoTLS,
-			TLSMap:           ws.TLSMap,
-			SameOrigin:       ws.SameOrigin,
-			AllowedOrigins:   copyStrings(ws.AllowedOrigins),
-			Compression:      ws.Compression,
-			HandshakeTimeout: ws.HandshakeTimeout,
-		},
+
 		Start:                 s.start,
 		MaxSubs:               opts.MaxSubs,
 		Cores:                 numCores,
@@ -1583,8 +1510,7 @@ func (s *Server) updateVarzConfigReloadableFields(v *Varz) {
 	if s.sys != nil && s.sys.account != nil {
 		v.SystemAccount = s.sys.account.GetName()
 	}
-	v.MQTT.TLSPinnedCerts = getPinnedCertsAsSlice(opts.MQTT.TLSPinnedCerts)
-	v.Websocket.TLSPinnedCerts = getPinnedCertsAsSlice(opts.Websocket.TLSPinnedCerts)
+
 }
 
 func getPinnedCertsAsSlice(certs PinnedCertSet) []string {
@@ -1610,9 +1536,7 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	if l := len(s.info.ClientConnectURLs); l > 0 {
 		v.ClientConnectURLs = append([]string(nil), s.info.ClientConnectURLs...)
 	}
-	if l := len(s.info.WSConnectURLs); l > 0 {
-		v.WSConnectURLs = append([]string(nil), s.info.WSConnectURLs...)
-	}
+
 	v.Connections = len(s.clients)
 	v.TotalConnections = s.totalClients
 	v.Routes = len(s.routes)

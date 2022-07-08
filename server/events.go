@@ -193,7 +193,6 @@ type ClientInfo struct {
 	Tags       jwt.TagList   `json:"tags,omitempty"`
 	Kind       string        `json:"kind,omitempty"`
 	ClientType string        `json:"client_type,omitempty"`
-	MQTTClient string        `json:"client_id,omitempty"` // This is the MQTT client ID
 }
 
 // ServerStats hold various statistics that we will periodically send out.
@@ -1737,7 +1736,6 @@ func (s *Server) accountConnectEvent(c *client) {
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 	}
 	c.mu.Unlock()
@@ -1789,7 +1787,6 @@ func (s *Server) accountDisconnectEvent(c *client, now time.Time, reason string)
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 		Sent: DataStats{
 			Msgs:  atomic.LoadInt64(&c.inMsgs),
@@ -1842,7 +1839,6 @@ func (s *Server) sendAuthErrorEvent(c *client) {
 			NameTag:    c.nameTag,
 			Kind:       c.kindString(),
 			ClientType: c.clientTypeString(),
-			MQTTClient: c.getMQTTClientID(),
 		},
 		Sent: DataStats{
 			Msgs:  c.inMsgs,

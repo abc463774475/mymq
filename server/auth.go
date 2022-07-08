@@ -261,10 +261,6 @@ func (s *Server) configureAuthorization() {
 		s.info.AuthRequired = false
 	}
 
-	// Do similar for websocket config
-	s.wsConfigAuth(&opts.Websocket)
-	// And for mqtt config
-	s.mqttConfigAuth(&opts.MQTT)
 }
 
 // Takes the given slices of NkeyUser and User options and build
@@ -385,12 +381,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 	authRequired := s.info.AuthRequired
 	if !authRequired {
 		// If no auth required for regular clients, then check if
-		// we have an override for MQTT or Websocket clients.
 		switch c.clientType() {
-		case MQTT:
-			authRequired = s.mqtt.authOverride
-		case WS:
-			authRequired = s.websocket.authOverride
 		}
 	}
 	if !authRequired {
@@ -408,32 +399,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 	tlsMap := opts.TLSMap
 	if c.kind == CLIENT {
 		switch c.clientType() {
-		case MQTT:
-			mo := &opts.MQTT
-			// Always override TLSMap.
-			tlsMap = mo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the mqtt's config.
-			if s.mqtt.authOverride {
-				noAuthUser = mo.NoAuthUser
-				username = mo.Username
-				password = mo.Password
-				token = mo.Token
-				ao = true
-			}
-		case WS:
-			wo := &opts.Websocket
-			// Always override TLSMap.
-			tlsMap = wo.TLSMap
-			// The rest depends on if there was any auth override in
-			// the websocket's config.
-			if s.websocket.authOverride {
-				noAuthUser = wo.NoAuthUser
-				username = wo.Username
-				password = wo.Password
-				token = wo.Token
-				ao = true
-			}
+
 		}
 	} else {
 		tlsMap = opts.LeafNode.TLSMap
@@ -568,20 +534,16 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		if err != nil {
 			// We got an error, which means some connection types were unknown. As long as
 			// a valid one is returned, we proceed with auth. If not, we have to reject.
-			// In other words, suppose that JWT allows "WEBSOCKET" in the array. No error
-			// is returned and allowedConnTypes will contain "WEBSOCKET" only.
-			// Client will be rejected if not a websocket client, or proceed with rest of
+			// . No error
+			//
+			// Client will be rejected if not a  or proceed with rest of
 			// auth if it is.
-			// Now suppose JWT allows "WEBSOCKET, MQTT" and say MQTT is not known by this
-			// server. In this case, allowedConnTypes would contain "WEBSOCKET" and we
-			// would get `err` indicating that "MQTT" is an unknown connection type.
-			// If a websocket client connects, it should still be allowed, since after all
-			// the admin wanted to allow websocket and mqtt connection types.
-			// However, say that the JWT only allows "MQTT" (and again suppose this server
-			// does not know about MQTT connection type), then since the allowedConnTypes
+			// Now suppose JWT allows
+			// server. In this case, allowedConnTypes would contain  and we
+			// However, say that the JWT only (and again suppose this server
 			// map would be empty (no valid types found), and since empty means allow-all,
 			// then we should reject because the intent was to allow connections for this
-			// user only as an MQTT client.
+
 			c.Debugf("%v", err)
 			if len(allowedConnTypes) == 0 {
 				return false
@@ -1134,9 +1096,8 @@ func validateAllowedConnectionTypes(m map[string]struct{}) error {
 	for ct := range m {
 		ctuc := strings.ToUpper(ct)
 		switch ctuc {
-		case jwt.ConnectionTypeStandard, jwt.ConnectionTypeWebsocket,
-			jwt.ConnectionTypeLeafnode, jwt.ConnectionTypeLeafnodeWS,
-			jwt.ConnectionTypeMqtt, jwt.ConnectionTypeMqttWS:
+		case jwt.ConnectionTypeStandard,
+			jwt.ConnectionTypeLeafnode:
 		default:
 			return fmt.Errorf("unknown connection type %q", ct)
 		}
