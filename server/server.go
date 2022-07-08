@@ -679,10 +679,7 @@ func validateOptions(o *Options) error {
 		return fmt.Errorf("max_payload (%v) cannot be higher than max_pending (%v)",
 			o.MaxPayload, o.MaxPending)
 	}
-	// Check that the trust configuration is correct.
-	if err := validateTrustedOperators(o); err != nil {
-		return err
-	}
+
 	// Check on leaf nodes which will require a system
 	// account when gateways are also configured.
 	if err := validateLeafNode(o); err != nil {

@@ -141,7 +141,7 @@ func (s *Server) solicitLeafNodeRemotes(remotes []*RemoteLeafOpts) {
 		s.mu.Unlock()
 		if creds != _EMPTY_ {
 			contents, err := ioutil.ReadFile(creds)
-			defer wipeSlice(contents)
+
 			if err != nil {
 				s.Errorf("Error reading LeafNode Remote Credentials file %q: %v", creds, err)
 			} else if items := credsRe.FindAllSubmatch(contents, -1); len(items) < 2 {
@@ -690,7 +690,7 @@ func (c *client) sendLeafConnect(clusterName string, tlsRequired, headers bool) 
 			c.Errorf("%v", err)
 			return err
 		}
-		defer wipeSlice(contents)
+
 		items := credsRe.FindAllSubmatch(contents, -1)
 		if len(items) < 2 {
 			c.Errorf("Credentials file malformed")

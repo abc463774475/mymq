@@ -626,15 +626,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			c.Debugf("User authentication revoked")
 			return false
 		}
-		if !validateSrc(juc, c.host) {
-			c.Errorf("Bad src Ip %s", c.host)
-			return false
-		}
-		allowNow, validFor := validateTimes(juc)
-		if !allowNow {
-			c.Errorf("Outside connect times")
-			return false
-		}
 
 		nkey = buildInternalNkeyUser(juc, allowedConnTypes, acc)
 		if err := c.RegisterNkeyUser(nkey); err != nil {
@@ -668,9 +659,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 		c.tags = juc.Tags
 		c.nameTag = juc.Name
 		c.mu.Unlock()
-
-		// Check if we need to set an auth timer if the user jwt expires.
-		c.setExpiration(juc.Claims(), validFor)
 
 		acc.mu.RLock()
 		c.Debugf("Authenticated JWT: %s %q (claim-name: %q, claim-tags: %q) "+

@@ -920,16 +920,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		}
 		// Assume for now these are file names, but they can also be the JWT itself inline.
 		o.TrustedOperators = make([]*jwt.OperatorClaims, 0, len(opFiles))
-		for _, fname := range opFiles {
-			theJWT, opc, err := readOperatorJWT(fname)
-			if err != nil {
-				err := &configErr{tk, fmt.Sprintf("error parsing operator JWT: %v", err)}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.operatorJWT = append(o.operatorJWT, theJWT)
-			o.TrustedOperators = append(o.TrustedOperators, opc)
-		}
+
 		if len(o.TrustedOperators) == 1 {
 			// In case "resolver" is defined as well, it takes precedence
 			if o.AccountResolver == nil {
