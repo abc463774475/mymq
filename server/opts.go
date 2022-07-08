@@ -61,22 +61,21 @@ type PinnedCertSet map[string]struct{}
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type ClusterOpts struct {
-	Name              string            `json:"-"`
-	Host              string            `json:"addr,omitempty"`
-	Port              int               `json:"cluster_port,omitempty"`
-	Username          string            `json:"-"`
-	Password          string            `json:"-"`
-	AuthTimeout       float64           `json:"auth_timeout,omitempty"`
-	Permissions       *RoutePermissions `json:"-"`
-	TLSTimeout        float64           `json:"-"`
-	TLSConfig         *tls.Config       `json:"-"`
-	TLSMap            bool              `json:"-"`
-	TLSCheckKnownURLs bool              `json:"-"`
-	TLSPinnedCerts    PinnedCertSet     `json:"-"`
-	ListenStr         string            `json:"-"`
-	Advertise         string            `json:"-"`
-	NoAdvertise       bool              `json:"-"`
-	ConnectRetries    int               `json:"-"`
+	Name              string        `json:"-"`
+	Host              string        `json:"addr,omitempty"`
+	Port              int           `json:"cluster_port,omitempty"`
+	Username          string        `json:"-"`
+	Password          string        `json:"-"`
+	AuthTimeout       float64       `json:"auth_timeout,omitempty"`
+	TLSTimeout        float64       `json:"-"`
+	TLSConfig         *tls.Config   `json:"-"`
+	TLSMap            bool          `json:"-"`
+	TLSCheckKnownURLs bool          `json:"-"`
+	TLSPinnedCerts    PinnedCertSet `json:"-"`
+	ListenStr         string        `json:"-"`
+	Advertise         string        `json:"-"`
+	NoAdvertise       bool          `json:"-"`
+	ConnectRetries    int           `json:"-"`
 
 	// Not exported (used in tests)
 	resolver netResolver
@@ -282,9 +281,6 @@ type Options struct {
 	// the server and so not presented as a configuration option
 	AlwaysEnableNonce bool
 
-	CustomClientAuthentication Authentication `json:"-"`
-	CustomRouterAuthentication Authentication `json:"-"`
-
 	// CheckConfig configuration file syntax test was successful and exit.
 	CheckConfig bool `json:"-"`
 
@@ -393,10 +389,9 @@ type authorization struct {
 	token string
 	acc   string
 	// Multiple Nkeys/Users
-	nkeys              []*NkeyUser
-	users              []*User
-	timeout            float64
-	defaultPermissions *Permissions
+	nkeys   []*NkeyUser
+	users   []*User
+	timeout float64
 }
 
 // TLSConfigOpts holds the parsed tls config information,
@@ -641,68 +636,6 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		if err != nil {
 			*errors = append(*errors, err)
 			return
-		}
-	case "authorization":
-		auth, err := parseAuthorization(tk, o, errors, warnings)
-		if err != nil {
-			*errors = append(*errors, err)
-			return
-		}
-
-		o.Username = auth.user
-		o.Password = auth.pass
-		o.Authorization = auth.token
-		o.AuthTimeout = auth.timeout
-		if (auth.user != _EMPTY_ || auth.pass != _EMPTY_) && auth.token != _EMPTY_ {
-			err := &configErr{tk, "Cannot have a user/pass and token"}
-			*errors = append(*errors, err)
-			return
-		}
-		// In case parseAccounts() was done first, we need to check for duplicates.
-		unames := setupUsersAndNKeysDuplicateCheckMap(o)
-		// Check for multiple users defined.
-		// Note: auth.users will be != nil as long as `users: []` is present
-		// in the authorization block, even if empty, and will also account for
-		// nkey users. We also check for users/nkeys that may have been already
-		// added in parseAccounts() (which means they will be in unames)
-		if auth.users != nil || len(unames) > 0 {
-			if auth.user != _EMPTY_ {
-				err := &configErr{tk, "Can not have a single user/pass and a users array"}
-				*errors = append(*errors, err)
-				return
-			}
-			if auth.token != _EMPTY_ {
-				err := &configErr{tk, "Can not have a token and a users array"}
-				*errors = append(*errors, err)
-				return
-			}
-			// Now check that if we have users, there is no duplicate, including
-			// users that may have been configured in parseAccounts().
-			if len(auth.users) > 0 {
-				for _, u := range auth.users {
-					if _, ok := unames[u.Username]; ok {
-						err := &configErr{tk, fmt.Sprintf("Duplicate user %q detected", u.Username)}
-						*errors = append(*errors, err)
-						return
-					}
-					unames[u.Username] = struct{}{}
-				}
-				// Users may have been added from Accounts parsing, so do an append here
-				o.Users = append(o.Users, auth.users...)
-			}
-		}
-		// Check for nkeys
-		if len(auth.nkeys) > 0 {
-			for _, u := range auth.nkeys {
-				if _, ok := unames[u.Nkey]; ok {
-					err := &configErr{tk, fmt.Sprintf("Duplicate nkey %q detected", u.Nkey)}
-					*errors = append(*errors, err)
-					return
-				}
-				unames[u.Nkey] = struct{}{}
-			}
-			// NKeys may have been added from Accounts parsing, so do an append here
-			o.Nkeys = append(o.Nkeys, auth.nkeys...)
 		}
 	case "http":
 		hp, err := parseListen(v)
@@ -1309,41 +1242,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.Port = int(mv.(int64))
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
-		case "authorization":
-			auth, err := parseAuthorization(tk, opts, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if auth.users != nil {
-				err := &configErr{tk, "Cluster authorization does not allow multiple users"}
-				*errors = append(*errors, err)
-				continue
-			}
-			if auth.token != _EMPTY_ {
-				err := &configErr{tk, "Cluster authorization does not support tokens"}
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.Cluster.Username = auth.user
-			opts.Cluster.Password = auth.pass
-			opts.Cluster.AuthTimeout = auth.timeout
 
-			if auth.defaultPermissions != nil {
-				err := &configWarningErr{
-					field: mk,
-					configErr: configErr{
-						token:  tk,
-						reason: `setting "permissions" within cluster authorization block is deprecated`,
-					},
-				}
-				*warnings = append(*warnings, err)
-
-				// Do not set permissions if they were specified in top-level cluster block.
-				if opts.Cluster.Permissions == nil {
-					setClusterPermissions(&opts.Cluster, auth.defaultPermissions)
-				}
-			}
 		case "routes":
 			ra := mv.([]interface{})
 			routes, errs := parseURLs(ra, "route", warnings)
@@ -1371,20 +1270,6 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			trackExplicitVal(opts, &opts.inConfig, "Cluster.NoAdvertise", opts.Cluster.NoAdvertise)
 		case "connect_retries":
 			opts.Cluster.ConnectRetries = int(mv.(int64))
-		case "permissions":
-			perms, err := parseUserPermissions(mv, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			// Dynamic response permissions do not make sense here.
-			if perms.Response != nil {
-				err := &configErr{tk, "Cluster permissions do not support dynamic responses"}
-				*errors = append(*errors, err)
-				continue
-			}
-			// This will possibly override permissions that were define in auth block
-			setClusterPermissions(&opts.Cluster, perms)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -1473,24 +1358,6 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 			o.Gateway.Port = int(mv.(int64))
 		case "host", "net":
 			o.Gateway.Host = mv.(string)
-		case "authorization":
-			auth, err := parseAuthorization(tk, o, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if auth.users != nil {
-				*errors = append(*errors, &configErr{tk, "Gateway authorization does not allow multiple users"})
-				continue
-			}
-			if auth.token != _EMPTY_ {
-				err := &configErr{tk, "Gateway authorization does not support tokens"}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.Gateway.Username = auth.user
-			o.Gateway.Password = auth.pass
-			o.Gateway.AuthTimeout = auth.timeout
 		case "tls":
 			config, tlsopts, err := getTLSConfig(tk)
 			if err != nil {
@@ -2191,20 +2058,6 @@ func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*Remote
 	return gateways, nil
 }
 
-// Sets cluster's permissions based on given pub/sub permissions,
-// doing the appropriate translation.
-func setClusterPermissions(opts *ClusterOpts, perms *Permissions) {
-	// Import is whether or not we will send a SUB for interest to the other side.
-	// Export is whether or not we will accept a SUB from the remote for a given subject.
-	// Both only effect interest registration.
-	// The parsing sets Import into Publish and Export into Subscribe, convert
-	// accordingly.
-	opts.Permissions = &RoutePermissions{
-		Import: perms.Publish,
-		Export: perms.Subscribe,
-	}
-}
-
 // Temp structures to hold account import and export defintions since they need
 // to be processed after being parsed.
 type export struct {
@@ -2510,13 +2363,6 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 						*errors = append(*errors, err)
 						continue
 					}
-				case "default_permissions":
-					permissions, err := parseUserPermissions(tk, errors, warnings)
-					if err != nil {
-						*errors = append(*errors, err)
-						continue
-					}
-					acc.defaultPerms = permissions
 				case "mappings", "maps":
 					err := parseAccountMappings(tk, acc, errors, warnings)
 					if err != nil {
@@ -2555,7 +2401,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					continue
 				}
 			}
-			applyDefaultPermissions(users, nkeyUsr, acc.defaultPerms)
+
 			for _, u := range nkeyUsr {
 				if _, ok := uorn[u.Nkey]; ok {
 					err := &configErr{usersTk, fmt.Sprintf("Duplicate nkey %q detected", u.Nkey)}
@@ -3196,86 +3042,6 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 	return curStream, curService, nil
 }
 
-// Apply permission defaults to users/nkeyuser that don't have their own.
-func applyDefaultPermissions(users []*User, nkeys []*NkeyUser, defaultP *Permissions) {
-	if defaultP == nil {
-		return
-	}
-	for _, user := range users {
-		if user.Permissions == nil {
-			user.Permissions = defaultP
-		}
-	}
-	for _, user := range nkeys {
-		if user.Permissions == nil {
-			user.Permissions = defaultP
-		}
-	}
-}
-
-// Helper function to parse Authorization configs.
-func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings *[]error) (*authorization, error) {
-	var (
-		am   map[string]interface{}
-		tk   token
-		lt   token
-		auth = &authorization{}
-	)
-	defer convertPanicToErrorList(&lt, errors)
-
-	_, v = unwrapValue(v, &lt)
-	am = v.(map[string]interface{})
-	for mk, mv := range am {
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "user", "username":
-			auth.user = mv.(string)
-		case "pass", "password":
-			auth.pass = mv.(string)
-		case "token":
-			auth.token = mv.(string)
-		case "timeout":
-			at := float64(1)
-			switch mv := mv.(type) {
-			case int64:
-				at = float64(mv)
-			case float64:
-				at = mv
-			}
-			auth.timeout = at
-		case "users":
-			nkeys, users, err := parseUsers(tk, opts, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			auth.users = users
-			auth.nkeys = nkeys
-		case "default_permission", "default_permissions", "permissions":
-			permissions, err := parseUserPermissions(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			auth.defaultPermissions = permissions
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-			}
-			continue
-		}
-
-		applyDefaultPermissions(auth.users, auth.nkeys, auth.defaultPermissions)
-	}
-	return auth, nil
-}
-
 // Helper function to parse multiple users array with optional permissions.
 func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]error) ([]*NkeyUser, []*User, error) {
 	var (
@@ -3304,10 +3070,8 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 		}
 
 		var (
-			user  = &User{}
-			nkey  = &NkeyUser{}
-			perms *Permissions
-			err   error
+			user = &User{}
+			nkey = &NkeyUser{}
 		)
 		for k, v := range um {
 			// Also needs to unwrap first
@@ -3320,12 +3084,6 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 				user.Username = v.(string)
 			case "pass", "password":
 				user.Password = v.(string)
-			case "permission", "permissions", "authorization":
-				perms, err = parseUserPermissions(tk, errors, warnings)
-				if err != nil {
-					*errors = append(*errors, err)
-					continue
-				}
 			case "allowed_connection_types", "connection_types", "clients":
 				cts := parseAllowedConnectionTypes(tk, &lt, v, errors, warnings)
 				nkey.AllowedConnectionTypes = cts
@@ -3341,15 +3099,6 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 					*errors = append(*errors, err)
 					continue
 				}
-			}
-		}
-		// Place perms if we have them.
-		if perms != nil {
-			// nkey takes precedent.
-			if nkey.Nkey != "" {
-				nkey.Permissions = perms
-			} else {
-				user.Permissions = perms
 			}
 		}
 
@@ -3386,86 +3135,6 @@ func parseAllowedConnectionTypes(tk token, lt *token, mv interface{}, errors *[]
 	return m
 }
 
-// Helper function to parse user/account permissions
-func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissions, error) {
-	var (
-		tk token
-		lt token
-		p  = &Permissions{}
-	)
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, mv = unwrapValue(mv, &lt)
-	pm, ok := mv.(map[string]interface{})
-	if !ok {
-		return nil, &configErr{tk, fmt.Sprintf("Expected permissions to be a map/struct, got %+v", mv)}
-	}
-	for k, v := range pm {
-		tk, mv = unwrapValue(v, &lt)
-
-		switch strings.ToLower(k) {
-		// For routes:
-		// Import is Publish
-		// Export is Subscribe
-		case "pub", "publish", "import":
-			perms, err := parseVariablePermissions(mv, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			p.Publish = perms
-		case "sub", "subscribe", "export":
-			perms, err := parseVariablePermissions(mv, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			p.Subscribe = perms
-		case "publish_allow_responses", "allow_responses":
-			rp := &ResponsePermission{
-				MaxMsgs: DEFAULT_ALLOW_RESPONSE_MAX_MSGS,
-				Expires: DEFAULT_ALLOW_RESPONSE_EXPIRATION,
-			}
-			// Try boolean first
-			responses, ok := mv.(bool)
-			if ok {
-				if responses {
-					p.Response = rp
-				}
-			} else {
-				p.Response = parseAllowResponses(v, errors, warnings)
-			}
-			if p.Response != nil {
-				if p.Publish == nil {
-					p.Publish = &SubjectPermission{}
-				}
-				if p.Publish.Allow == nil {
-					// We turn off the blanket allow statement.
-					p.Publish.Allow = []string{}
-				}
-			}
-		default:
-			if !tk.IsUsedVariable() {
-				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing permissions", k)}
-				*errors = append(*errors, err)
-			}
-		}
-	}
-	return p, nil
-}
-
-// Top level parser for authorization configurations.
-func parseVariablePermissions(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
-	switch vv := v.(type) {
-	case map[string]interface{}:
-		// New style with allow and/or deny properties.
-		return parseSubjectPermission(vv, errors, warnings)
-	default:
-		// Old style
-		return parseOldPermissionStyle(v, errors, warnings)
-	}
-}
-
 // Helper function to parse subject singletons and/or arrays
 func parsePermSubjects(v interface{}, errors, warnings *[]error) ([]string, error) {
 	var lt token
@@ -3496,110 +3165,6 @@ func parsePermSubjects(v interface{}, errors, warnings *[]error) ([]string, erro
 		return nil, &configErr{tk, err.Error()}
 	}
 	return subjects, nil
-}
-
-// Helper function to parse a ResponsePermission.
-func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePermission {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	// Check if this is a map.
-	pm, ok := v.(map[string]interface{})
-	if !ok {
-		err := &configErr{tk, "error parsing response permissions, expected a boolean or a map"}
-		*errors = append(*errors, err)
-		return nil
-	}
-
-	rp := &ResponsePermission{
-		MaxMsgs: DEFAULT_ALLOW_RESPONSE_MAX_MSGS,
-		Expires: DEFAULT_ALLOW_RESPONSE_EXPIRATION,
-	}
-
-	for k, v := range pm {
-		tk, v = unwrapValue(v, &lt)
-		switch strings.ToLower(k) {
-		case "max", "max_msgs", "max_messages", "max_responses":
-			max := int(v.(int64))
-			// Negative values are accepted (mean infinite), and 0
-			// means default value (set above).
-			if max != 0 {
-				rp.MaxMsgs = max
-			}
-		case "expires", "expiration", "ttl":
-			wd, ok := v.(string)
-			if ok {
-				ttl, err := time.ParseDuration(wd)
-				if err != nil {
-					err := &configErr{tk, fmt.Sprintf("error parsing expires: %v", err)}
-					*errors = append(*errors, err)
-					return nil
-				}
-				// Negative values are accepted (mean infinite), and 0
-				// means default value (set above).
-				if ttl != 0 {
-					rp.Expires = ttl
-				}
-			} else {
-				err := &configErr{tk, "error parsing expires, not a duration string"}
-				*errors = append(*errors, err)
-				return nil
-			}
-		default:
-			if !tk.IsUsedVariable() {
-				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing permissions", k)}
-				*errors = append(*errors, err)
-			}
-		}
-	}
-	return rp
-}
-
-// Helper function to parse old style authorization configs.
-func parseOldPermissionStyle(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
-	subjects, err := parsePermSubjects(v, errors, warnings)
-	if err != nil {
-		return nil, err
-	}
-	return &SubjectPermission{Allow: subjects}, nil
-}
-
-// Helper function to parse new style authorization into a SubjectPermission with Allow and Deny.
-func parseSubjectPermission(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	m := v.(map[string]interface{})
-	if len(m) == 0 {
-		return nil, nil
-	}
-	p := &SubjectPermission{}
-	for k, v := range m {
-		tk, _ := unwrapValue(v, &lt)
-		switch strings.ToLower(k) {
-		case "allow":
-			subjects, err := parsePermSubjects(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			p.Allow = subjects
-		case "deny":
-			subjects, err := parsePermSubjects(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			p.Deny = subjects
-		default:
-			if !tk.IsUsedVariable() {
-				err := &configErr{tk, fmt.Sprintf("Unknown field name %q parsing subject permissions, only 'allow' or 'deny' are permitted", k)}
-				*errors = append(*errors, err)
-			}
-		}
-	}
-	return p, nil
 }
 
 // Helper function to validate permissions subjects.

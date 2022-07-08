@@ -79,19 +79,18 @@ type Account struct {
 	js           *jsAccount
 	jsLimits     map[string]JetStreamAccountLimits
 	limits
-	expired      bool
-	incomplete   bool
-	signingKeys  map[string]jwt.Scope
-	srv          *Server // server this account is registered with (possibly nil)
-	lds          string  // loop detection subject for leaf nodes
-	siReply      []byte  // service reply prefix, will form wildcard subscription.
-	prand        *rand.Rand
-	eventIds     *nuid.NUID
-	eventIdsMu   sync.Mutex
-	defaultPerms *Permissions
-	tags         jwt.TagList
-	nameTag      string
-	lastLimErr   int64
+	expired     bool
+	incomplete  bool
+	signingKeys map[string]jwt.Scope
+	srv         *Server // server this account is registered with (possibly nil)
+	lds         string  // loop detection subject for leaf nodes
+	siReply     []byte  // service reply prefix, will form wildcard subscription.
+	prand       *rand.Rand
+	eventIds    *nuid.NUID
+	eventIdsMu  sync.Mutex
+	tags        jwt.TagList
+	nameTag     string
+	lastLimErr  int64
 }
 
 // Account based limits.
@@ -3263,7 +3262,6 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	} else {
 		a.usersRevoked = nil
 	}
-	a.defaultPerms = buildPermissionsFromJwt(&ac.DefaultPermissions)
 	a.incomplete = len(incompleteImports) != 0
 	for _, i := range incompleteImports {
 		s.incompleteAccExporterMap.Store(i.Account, struct{}{})
@@ -3441,40 +3439,6 @@ func (s *Server) buildInternalAccount(ac *jwt.AccountClaims) *Account {
 	return acc
 }
 
-// Helper to build Permissions from jwt.Permissions
-// or return nil if none were specified
-func buildPermissionsFromJwt(uc *jwt.Permissions) *Permissions {
-	if uc == nil {
-		return nil
-	}
-	var p *Permissions
-	if len(uc.Pub.Allow) > 0 || len(uc.Pub.Deny) > 0 {
-		p = &Permissions{}
-		p.Publish = &SubjectPermission{}
-		p.Publish.Allow = uc.Pub.Allow
-		p.Publish.Deny = uc.Pub.Deny
-	}
-	if len(uc.Sub.Allow) > 0 || len(uc.Sub.Deny) > 0 {
-		if p == nil {
-			p = &Permissions{}
-		}
-		p.Subscribe = &SubjectPermission{}
-		p.Subscribe.Allow = uc.Sub.Allow
-		p.Subscribe.Deny = uc.Sub.Deny
-	}
-	if uc.Resp != nil {
-		if p == nil {
-			p = &Permissions{}
-		}
-		p.Response = &ResponsePermission{
-			MaxMsgs: uc.Resp.MaxMsgs,
-			Expires: uc.Resp.Expires,
-		}
-		validateResponsePermissions(p)
-	}
-	return p
-}
-
 // Helper to build internal NKeyUser.
 func buildInternalNkeyUser(uc *jwt.UserClaims, acts map[string]struct{}, acc *Account) *NkeyUser {
 	nu := &NkeyUser{Nkey: uc.Subject, Account: acc, AllowedConnectionTypes: acts}
@@ -3482,12 +3446,6 @@ func buildInternalNkeyUser(uc *jwt.UserClaims, acts map[string]struct{}, acc *Ac
 		nu.SigningKey = uc.Issuer
 	}
 
-	// Now check for permissions.
-	var p = buildPermissionsFromJwt(&uc.Permissions)
-	if p == nil && acc.defaultPerms != nil {
-		p = acc.defaultPerms.clone()
-	}
-	nu.Permissions = p
 	return nu
 }
 

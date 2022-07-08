@@ -710,12 +710,10 @@ func (s *Server) HandleConnz(w http.ResponseWriter, r *http.Request) {
 
 // Routez represents detailed information on current client connections.
 type Routez struct {
-	ID        string             `json:"server_id"`
-	Now       time.Time          `json:"now"`
-	Import    *SubjectPermission `json:"import,omitempty"`
-	Export    *SubjectPermission `json:"export,omitempty"`
-	NumRoutes int                `json:"num_routes"`
-	Routes    []*RouteInfo       `json:"routes"`
+	ID        string       `json:"server_id"`
+	Now       time.Time    `json:"now"`
+	NumRoutes int          `json:"num_routes"`
+	Routes    []*RouteInfo `json:"routes"`
 }
 
 // RoutezOptions are options passed to Routez
@@ -728,27 +726,26 @@ type RoutezOptions struct {
 
 // RouteInfo has detailed information on a per connection basis.
 type RouteInfo struct {
-	Rid          uint64             `json:"rid"`
-	RemoteID     string             `json:"remote_id"`
-	DidSolicit   bool               `json:"did_solicit"`
-	IsConfigured bool               `json:"is_configured"`
-	IP           string             `json:"ip"`
-	Port         int                `json:"port"`
-	Start        time.Time          `json:"start"`
-	LastActivity time.Time          `json:"last_activity"`
-	RTT          string             `json:"rtt,omitempty"`
-	Uptime       string             `json:"uptime"`
-	Idle         string             `json:"idle"`
-	Import       *SubjectPermission `json:"import,omitempty"`
-	Export       *SubjectPermission `json:"export,omitempty"`
-	Pending      int                `json:"pending_size"`
-	InMsgs       int64              `json:"in_msgs"`
-	OutMsgs      int64              `json:"out_msgs"`
-	InBytes      int64              `json:"in_bytes"`
-	OutBytes     int64              `json:"out_bytes"`
-	NumSubs      uint32             `json:"subscriptions"`
-	Subs         []string           `json:"subscriptions_list,omitempty"`
-	SubsDetail   []SubDetail        `json:"subscriptions_list_detail,omitempty"`
+	Rid          uint64    `json:"rid"`
+	RemoteID     string    `json:"remote_id"`
+	DidSolicit   bool      `json:"did_solicit"`
+	IsConfigured bool      `json:"is_configured"`
+	IP           string    `json:"ip"`
+	Port         int       `json:"port"`
+	Start        time.Time `json:"start"`
+	LastActivity time.Time `json:"last_activity"`
+	RTT          string    `json:"rtt,omitempty"`
+	Uptime       string    `json:"uptime"`
+	Idle         string    `json:"idle"`
+
+	Pending    int         `json:"pending_size"`
+	InMsgs     int64       `json:"in_msgs"`
+	OutMsgs    int64       `json:"out_msgs"`
+	InBytes    int64       `json:"in_bytes"`
+	OutBytes   int64       `json:"out_bytes"`
+	NumSubs    uint32      `json:"subscriptions"`
+	Subs       []string    `json:"subscriptions_list,omitempty"`
+	SubsDetail []SubDetail `json:"subscriptions_list_detail,omitempty"`
 }
 
 // Routez returns a Routez struct containing information about routes.
@@ -766,12 +763,6 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 	// copy the server id for monitoring
 	rs.ID = s.info.ID
 
-	// Check for defined permissions for all connected routes.
-	if perms := s.getOpts().Cluster.Permissions; perms != nil {
-		rs.Import = perms.Import
-		rs.Export = perms.Export
-	}
-
 	// Walk the list
 	for _, r := range s.routes {
 		r.mu.Lock()
@@ -785,8 +776,6 @@ func (s *Server) Routez(routezOpts *RoutezOptions) (*Routez, error) {
 			InBytes:      atomic.LoadInt64(&r.inBytes),
 			OutBytes:     r.outBytes,
 			NumSubs:      uint32(len(r.subs)),
-			Import:       r.opts.Import,
-			Export:       r.opts.Export,
 			RTT:          r.getRTT().String(),
 			Start:        r.start,
 			LastActivity: r.last,

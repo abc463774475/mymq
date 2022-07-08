@@ -32,7 +32,6 @@ import (
 var FlagSnapshot *Options
 
 type reloadContext struct {
-	oldClusterPerms *RoutePermissions
 }
 
 // option is a hot-swappable configuration setting.
@@ -52,10 +51,6 @@ type option interface {
 
 	// IsTLSChange indicates if this option requires reloading TLS.
 	IsTLSChange() bool
-
-	// IsClusterPermsChange indicates if this option requires reloading
-	// cluster permissions.
-	IsClusterPermsChange() bool
 
 	// IsJetStreamChange inidicates a change in the servers config for JetStream.
 	// Account changes will be handled separately in reloadAuthorization.
@@ -815,8 +810,6 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 	// Apply to the new options some of the options that may have been set
 	// that can't be configured in the config file (this can happen in
 	// applications starting NATS Server programmatically).
-	newOpts.CustomClientAuthentication = curOpts.CustomClientAuthentication
-	newOpts.CustomRouterAuthentication = curOpts.CustomRouterAuthentication
 
 	changed, err := s.diffOptions(newOpts)
 	if err != nil {
@@ -831,7 +824,7 @@ func (s *Server) reloadOptions(curOpts, newOpts *Options) error {
 
 	// Create a context that is used to pass special info that we may need
 	// while applying the new options.
-	ctx := reloadContext{oldClusterPerms: curOpts.Cluster.Permissions}
+	ctx := reloadContext{}
 	s.setOpts(newOpts)
 	s.applyOptions(&ctx, changed)
 	return nil
@@ -872,7 +865,7 @@ func imposeOrder(value interface{}) error {
 			return value.Gateways[i].Name < value.Gateways[j].Name
 		})
 	case string, bool, uint8, int, int32, int64, time.Duration, float64, nil, LeafNodeOpts, ClusterOpts, *tls.Config, PinnedCertSet,
-		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, Authentication, jwt.TagList,
+		*URLAccResolver, *MemAccResolver, *DirAccResolver, *CacheDirAccResolver, jwt.TagList,
 		*OCSPConfig, map[string]string, JSLimitOpts:
 		// explicitly skipped types
 	default:
@@ -974,8 +967,7 @@ func (s *Server) diffOptions(newOpts *Options) ([]option, error) {
 			if err := validateClusterOpts(oldClusterOpts, newClusterOpts); err != nil {
 				return nil, err
 			}
-			permsChanged := !reflect.DeepEqual(newClusterOpts.Permissions, oldClusterOpts.Permissions)
-			diffOpts = append(diffOpts, &clusterOption{newValue: newClusterOpts, permsChanged: permsChanged})
+
 		case "routes":
 			add, remove := diffRoutes(oldValue.([]*url.URL), newValue.([]*url.URL))
 			diffOpts = append(diffOpts, &routesOption{add: add, remove: remove})
@@ -1298,7 +1290,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	var (
 		reloadLogging      = false
 		reloadAuth         = false
-		reloadClusterPerms = false
 		reloadClientTrcLvl = false
 		reloadJetstream    = false
 		jsEnabled          = false
@@ -1319,9 +1310,7 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		if opt.IsTLSChange() {
 			reloadTLS = true
 		}
-		if opt.IsClusterPermsChange() {
-			reloadClusterPerms = true
-		}
+
 		if opt.IsJetStreamChange() {
 			reloadJetstream = true
 			jsEnabled = opt.(*jetStreamOption).newValue
@@ -1339,9 +1328,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 	}
 	if reloadAuth {
 		s.reloadAuthorization()
-	}
-	if reloadClusterPerms {
-		s.reloadClusterPermissions(ctx.oldClusterPerms)
 	}
 
 	if reloadJetstream {
@@ -1475,7 +1461,6 @@ func (s *Server) reloadAuthorization() {
 		})
 		s.gacc = nil
 		s.configureAccounts()
-		s.configureAuthorization()
 		s.mu.Unlock()
 
 		s.accounts.Range(func(k, v interface{}) bool {
@@ -1635,7 +1620,7 @@ func (s *Server) reloadAuthorization() {
 	for _, c := range clients {
 		// Disconnect any unauthorized clients.
 		// Ignore internal clients.
-		if (c.kind == CLIENT || c.kind == LEAF) && !s.isClientAuthorized(c) {
+		if c.kind == CLIENT || c.kind == LEAF {
 			c.authViolation()
 			continue
 		}
@@ -1650,7 +1635,7 @@ func (s *Server) reloadAuthorization() {
 		// Do this only for routes that were accepted, not initiated
 		// because in the later case, we don't have the user name/password
 		// of the remote server.
-		if !route.isSolicitedRoute() && !s.isRouterAuthorized(route) {
+		if !route.isSolicitedRoute() {
 			route.setNoReconnect()
 			route.authViolation()
 		}
@@ -1702,123 +1687,6 @@ func (s *Server) clientHasMovedToDifferentAccount(c *client) bool {
 	}
 	// user/nkey no longer exists.
 	return true
-}
-
-// reloadClusterPermissions reconfigures the cluster's permssions
-// and set the permissions to all existing routes, sending an
-// update INFO protocol so that remote can resend their local
-// subs if needed, and sending local subs matching cluster's
-// import subjects.
-func (s *Server) reloadClusterPermissions(oldPerms *RoutePermissions) {
-	s.mu.Lock()
-	var (
-		infoJSON     []byte
-		newPerms     = s.opts.Cluster.Permissions
-		routes       = make(map[uint64]*client, len(s.routes))
-		withNewProto int
-	)
-	// Get all connected routes
-	for i, route := range s.routes {
-		// Count the number of routes that can understand receiving INFO updates.
-		route.mu.Lock()
-		if route.opts.Protocol >= RouteProtoInfo {
-			withNewProto++
-		}
-		route.mu.Unlock()
-		routes[i] = route
-	}
-	// If new permissions is nil, then clear routeInfo import/export
-	if newPerms == nil {
-		s.routeInfo.Import = nil
-		s.routeInfo.Export = nil
-	} else {
-		s.routeInfo.Import = newPerms.Import
-		s.routeInfo.Export = newPerms.Export
-	}
-	// Regenerate route INFO
-	s.generateRouteInfoJSON()
-	infoJSON = s.routeInfoJSON
-	gacc := s.gacc
-	s.mu.Unlock()
-
-	// If there were no route, we are done
-	if len(routes) == 0 {
-		return
-	}
-
-	// If only older servers, simply close all routes and they will do the right
-	// thing on reconnect.
-	if withNewProto == 0 {
-		for _, route := range routes {
-			route.closeConnection(RouteRemoved)
-		}
-		return
-	}
-
-	// Fake clients to test cluster permissions
-	oldPermsTester := &client{}
-	oldPermsTester.setRoutePermissions(oldPerms)
-	newPermsTester := &client{}
-	newPermsTester.setRoutePermissions(newPerms)
-
-	var (
-		_localSubs       [4096]*subscription
-		localSubs        = _localSubs[:0]
-		subsNeedSUB      []*subscription
-		subsNeedUNSUB    []*subscription
-		deleteRoutedSubs []*subscription
-	)
-	// FIXME(dlc) - Change for accounts.
-	gacc.sl.localSubs(&localSubs, false)
-
-	// Go through all local subscriptions
-	for _, sub := range localSubs {
-		// Get all subs that can now be imported
-		subj := string(sub.subject)
-		couldImportThen := oldPermsTester.canImport(subj)
-		canImportNow := newPermsTester.canImport(subj)
-		if canImportNow {
-			// If we could not before, then will need to send a SUB protocol.
-			if !couldImportThen {
-				subsNeedSUB = append(subsNeedSUB, sub)
-			}
-		} else if couldImportThen {
-			// We were previously able to import this sub, but now
-			// we can't so we need to send an UNSUB protocol
-			subsNeedUNSUB = append(subsNeedUNSUB, sub)
-		}
-	}
-
-	for _, route := range routes {
-		route.mu.Lock()
-		// If route is to older server, simply close connection.
-		if route.opts.Protocol < RouteProtoInfo {
-			route.mu.Unlock()
-			route.closeConnection(RouteRemoved)
-			continue
-		}
-		route.setRoutePermissions(newPerms)
-		for _, sub := range route.subs {
-			// If we can't export, we need to drop the subscriptions that
-			// we have on behalf of this route.
-			subj := string(sub.subject)
-			if !route.canExport(subj) {
-				delete(route.subs, string(sub.sid))
-				deleteRoutedSubs = append(deleteRoutedSubs, sub)
-			}
-		}
-		// Send an update INFO, which will allow remote server to show
-		// our current route config in monitoring and resend subscriptions
-		// that we now possibly allow with a change of Export permissions.
-		route.enqueueProto(infoJSON)
-		// Now send SUB and UNSUB protocols as needed.
-		route.sendRouteSubProtos(subsNeedSUB, false, nil)
-		route.sendRouteUnSubProtos(subsNeedUNSUB, false, nil)
-		route.mu.Unlock()
-	}
-	// Remove as a batch all the subs that we have removed from each route.
-	// FIXME(dlc) - Change for accounts.
-	gacc.sl.RemoveBatch(deleteRoutedSubs)
 }
 
 // validateClusterOpts ensures the new ClusterOpts does not change host or

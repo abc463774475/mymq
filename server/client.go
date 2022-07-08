@@ -218,11 +218,10 @@ type client struct {
 	// Here first because of use of atomics, and memory alignment.
 	stats
 	gwReplyMapping
-	kind  int
-	srv   *Server
-	acc   *Account
-	perms *permissions
-	in    readCache
+	kind int
+	srv  *Server
+	acc  *Account
+	in   readCache
 	parseState
 	opts       ClientOpts
 	rrTracking *rrTracking
@@ -305,16 +304,6 @@ type outbound struct {
 type perm struct {
 	allow *Sublist
 	deny  *Sublist
-}
-
-type permissions struct {
-	// Have these 2 first for memory alignment due to the use of atomic.
-	pcsz   int32
-	prun   int32
-	sub    perm
-	pub    perm
-	resp   *ResponsePermission
-	pcache sync.Map
 }
 
 // This is used to dynamically track responses and reply subjects
@@ -547,10 +536,6 @@ type ClientOpts struct {
 	AccountNew   bool   `json:"new_account,omitempty"`
 	Headers      bool   `json:"headers,omitempty"`
 	NoResponders bool   `json:"no_responders,omitempty"`
-
-	// Routes and Leafnodes only
-	Import *SubjectPermission `json:"import,omitempty"`
-	Export *SubjectPermission `json:"export,omitempty"`
 }
 
 var defaultOpts = ClientOpts{Verbose: true, Pedantic: true, Echo: true}
@@ -792,15 +777,6 @@ func (c *client) RegisterUser(user *User) {
 
 	c.mu.Lock()
 
-	// Assign permissions.
-	if user.Permissions == nil {
-		// Reset perms to nil in case client previously had them.
-		c.perms = nil
-		c.mperms = nil
-	} else {
-		c.setPermissions(user.Permissions)
-	}
-
 	// allows custom authenticators to set a username to be reported in
 	// server events and more
 	if user.Username != _EMPTY_ {
@@ -824,14 +800,8 @@ func (c *client) RegisterNkeyUser(user *NkeyUser) error {
 
 	c.mu.Lock()
 	c.user = user
-	// Assign permissions.
-	if user.Permissions == nil {
-		// Reset perms to nil in case client previously had them.
-		c.perms = nil
-		c.mperms = nil
-	} else {
-		c.setPermissions(user.Permissions)
-	}
+	c.mperms = nil
+
 	c.mu.Unlock()
 	return nil
 }
@@ -848,80 +818,6 @@ func splitSubjectQueue(sq string) ([]byte, []byte, error) {
 	return s, q, nil
 }
 
-// Initializes client.perms structure.
-// Lock is held on entry.
-func (c *client) setPermissions(perms *Permissions) {
-	if perms == nil {
-		return
-	}
-	c.perms = &permissions{}
-
-	// Loop over publish permissions
-	if perms.Publish != nil {
-		if perms.Publish.Allow != nil {
-			c.perms.pub.allow = NewSublistWithCache()
-		}
-		for _, pubSubject := range perms.Publish.Allow {
-			sub := &subscription{subject: []byte(pubSubject)}
-			c.perms.pub.allow.Insert(sub)
-		}
-		if len(perms.Publish.Deny) > 0 {
-			c.perms.pub.deny = NewSublistWithCache()
-		}
-		for _, pubSubject := range perms.Publish.Deny {
-			sub := &subscription{subject: []byte(pubSubject)}
-			c.perms.pub.deny.Insert(sub)
-		}
-	}
-
-	// Check if we are allowed to send responses.
-	if perms.Response != nil {
-		rp := *perms.Response
-		c.perms.resp = &rp
-		c.replies = make(map[string]*resp)
-	}
-
-	// Loop over subscribe permissions
-	if perms.Subscribe != nil {
-		var err error
-		if len(perms.Subscribe.Allow) > 0 {
-			c.perms.sub.allow = NewSublistWithCache()
-		}
-		for _, subSubject := range perms.Subscribe.Allow {
-			sub := &subscription{}
-			sub.subject, sub.queue, err = splitSubjectQueue(subSubject)
-			if err != nil {
-				c.Errorf("%s", err.Error())
-				continue
-			}
-			c.perms.sub.allow.Insert(sub)
-		}
-		if len(perms.Subscribe.Deny) > 0 {
-			c.perms.sub.deny = NewSublistWithCache()
-			// Also hold onto this array for later.
-			c.darray = perms.Subscribe.Deny
-		}
-		for _, subSubject := range perms.Subscribe.Deny {
-			sub := &subscription{}
-			sub.subject, sub.queue, err = splitSubjectQueue(subSubject)
-			if err != nil {
-				c.Errorf("%s", err.Error())
-				continue
-			}
-			c.perms.sub.deny.Insert(sub)
-		}
-	}
-
-	// If we are a leafnode and we are the hub copy the extracted perms
-	// to resend back to soliciting server. These are reversed from the
-	// way routes interpret them since this is how the soliciting server
-	// will receive these back in an update INFO.
-	if c.isHubLeafNode() {
-		c.opts.Import = perms.Subscribe
-		c.opts.Export = perms.Publish
-	}
-}
-
 type denyType int
 
 const (
@@ -929,57 +825,6 @@ const (
 	sub
 	both
 )
-
-// Merge client.perms structure with additional pub deny permissions
-// Lock is held on entry.
-func (c *client) mergeDenyPermissions(what denyType, denyPubs []string) {
-	if len(denyPubs) == 0 {
-		return
-	}
-	if c.perms == nil {
-		c.perms = &permissions{}
-	}
-	var perms []*perm
-	switch what {
-	case pub:
-		perms = []*perm{&c.perms.pub}
-	case sub:
-		perms = []*perm{&c.perms.sub}
-	case both:
-		perms = []*perm{&c.perms.pub, &c.perms.sub}
-	}
-	for _, p := range perms {
-		if p.deny == nil {
-			p.deny = NewSublistWithCache()
-		}
-	FOR_DENY:
-		for _, subj := range denyPubs {
-			r := p.deny.Match(subj)
-			for _, v := range r.qsubs {
-				for _, s := range v {
-					if string(s.subject) == subj {
-						continue FOR_DENY
-					}
-				}
-			}
-			for _, s := range r.psubs {
-				if string(s.subject) == subj {
-					continue FOR_DENY
-				}
-			}
-			sub := &subscription{subject: []byte(subj)}
-			p.deny.Insert(sub)
-		}
-	}
-}
-
-// Merge client.perms structure with additional pub deny permissions
-// Client lock must not be held on entry
-func (c *client) mergeDenyPermissionsLocked(what denyType, denyPubs []string) {
-	c.mu.Lock()
-	c.mergeDenyPermissions(what, denyPubs)
-	c.mu.Unlock()
-}
 
 // Check to see if we have an expiration for the user JWT via base claims.
 // FIXME(dlc) - Clear on connect with new JWT.
@@ -1736,7 +1581,6 @@ func (c *client) processConnect(arg []byte) error {
 	if srv != nil && srv.trustedKeys == nil {
 		c.opts.JWT = _EMPTY_
 	}
-	ujwt := c.opts.JWT
 
 	// For headers both client and server need to support.
 	c.headers = supportsHeaders && c.opts.Headers
@@ -1752,24 +1596,6 @@ func (c *client) processConnect(arg []byte) error {
 			srv.mu.Lock()
 			srv.cproto++
 			srv.mu.Unlock()
-		}
-
-		// Check for Auth
-		if ok := srv.checkAuthentication(c); !ok {
-			// We may fail here because we reached max limits on an account.
-			if ujwt != _EMPTY_ {
-				c.mu.Lock()
-				acc := c.acc
-				c.mu.Unlock()
-				srv.mu.Lock()
-				tooManyAccCons := acc != nil && acc != srv.gacc
-				srv.mu.Unlock()
-				if tooManyAccCons {
-					return ErrTooManyAccountConnections
-				}
-			}
-			c.authViolation()
-			return ErrAuthentication
 		}
 
 		// Check for Account designation, we used to have this as an optional feature for dynamic
@@ -2623,56 +2449,37 @@ func (c *client) addShadowSub(sub *subscription, ime *ime) (*subscription, error
 // canSubscribe determines if the client is authorized to subscribe to the
 // given subject. Assumes caller is holding lock.
 func (c *client) canSubscribe(subject string, optQueue ...string) bool {
-	if c.perms == nil {
-		return true
-	}
-
 	allowed := true
 
-	// Optional queue group.
-	var queue string
-	if len(optQueue) > 0 {
-		queue = optQueue[0]
-	}
+	//// Optional queue group.
+	//var queue string
+	//if len(optQueue) > 0 {
+	//	queue = optQueue[0]
+	//}
 
-	// Check allow list. If no allow list that means all are allowed. Deny can overrule.
-	if c.perms.sub.allow != nil {
-		r := c.perms.sub.allow.Match(subject)
-		allowed = len(r.psubs) > 0
-		if queue != _EMPTY_ && len(r.qsubs) > 0 {
-			// If the queue appears in the allow list, then DO allow.
-			allowed = queueMatches(queue, r.qsubs)
-		}
-		// Leafnodes operate slightly differently in that they allow broader scoped subjects.
-		// They will prune based on publish perms before sending to a leafnode client.
-		if !allowed && c.kind == LEAF && subjectHasWildcard(subject) {
-			r := c.perms.sub.allow.ReverseMatch(subject)
-			allowed = len(r.psubs) != 0
-		}
-	}
 	// If we have a deny list and we think we are allowed, check that as well.
-	if allowed && c.perms.sub.deny != nil {
-		r := c.perms.sub.deny.Match(subject)
-		allowed = len(r.psubs) == 0
-
-		if queue != _EMPTY_ && len(r.qsubs) > 0 {
-			// If the queue appears in the deny list, then DO NOT allow.
-			allowed = !queueMatches(queue, r.qsubs)
-		}
-
-		// We use the actual subscription to signal us to spin up the deny mperms
-		// and cache. We check if the subject is a wildcard that contains any of
-		// the deny clauses.
-		// FIXME(dlc) - We could be smarter and track when these go away and remove.
-		if allowed && c.mperms == nil && subjectHasWildcard(subject) {
-			// Whip through the deny array and check if this wildcard subject is within scope.
-			for _, sub := range c.darray {
-				if subjectIsSubsetMatch(sub, subject) {
-					c.loadMsgDenyFilter()
-					break
-				}
-			}
-		}
+	if allowed {
+		//r := c.perms.sub.deny.Match(subject)
+		//allowed = len(r.psubs) == 0
+		//
+		//if queue != _EMPTY_ && len(r.qsubs) > 0 {
+		//	// If the queue appears in the deny list, then DO NOT allow.
+		//	allowed = !queueMatches(queue, r.qsubs)
+		//}
+		//
+		//// We use the actual subscription to signal us to spin up the deny mperms
+		//// and cache. We check if the subject is a wildcard that contains any of
+		//// the deny clauses.
+		//// FIXME(dlc) - We could be smarter and track when these go away and remove.
+		//if allowed && c.mperms == nil && subjectHasWildcard(subject) {
+		//	// Whip through the deny array and check if this wildcard subject is within scope.
+		//	for _, sub := range c.darray {
+		//		if subjectIsSubsetMatch(sub, subject) {
+		//			c.loadMsgDenyFilter()
+		//			break
+		//		}
+		//	}
+		//}
 	}
 	return allowed
 }
@@ -3022,15 +2829,6 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 		return false
 	}
 
-	// Check if we are a leafnode and have perms to check.
-	if client.kind == LEAF && client.perms != nil {
-		if !client.pubAllowedFullCheck(string(subject), true, true) {
-			client.mu.Unlock()
-			client.Debugf("Not permitted to deliver to %q", subject)
-			return false
-		}
-	}
-
 	srv := client.srv
 
 	sub.nm++
@@ -3164,7 +2962,6 @@ func (c *client) deliverMsg(sub *subscription, acc *Account, subject, reply, mh,
 	if client.replies != nil && len(reply) > 0 {
 		client.replies[string(reply)] = &resp{time.Now(), 0}
 		if len(client.replies) > replyPermLimit {
-			client.pruneReplyPerms()
 		}
 	}
 
@@ -3268,27 +3065,6 @@ func (c *client) pruneRemoteTracking() {
 	c.mu.Unlock()
 }
 
-// pruneReplyPerms will remove any stale or expired entries
-// in our reply cache. We make sure to not check too often.
-func (c *client) pruneReplyPerms() {
-	// Make sure we do not check too often.
-	if c.perms.resp == nil {
-		return
-	}
-
-	mm := c.perms.resp.MaxMsgs
-	ttl := c.perms.resp.Expires
-	now := time.Now()
-
-	for k, resp := range c.replies {
-		if mm > 0 && resp.n >= mm {
-			delete(c.replies, k)
-		} else if ttl > 0 && now.Sub(resp.t) > ttl {
-			delete(c.replies, k)
-		}
-	}
-}
-
 // pruneDenyCache will prune the deny cache via randomly
 // deleting items. Doing so pruneSize items at a time.
 // Lock must be held for this one since it is shared under
@@ -3301,89 +3077,6 @@ func (c *client) pruneDenyCache() {
 			break
 		}
 	}
-}
-
-// prunePubPermsCache will prune the cache via randomly
-// deleting items. Doing so pruneSize items at a time.
-func (c *client) prunePubPermsCache() {
-	// There is a case where we can invoke this from multiple go routines,
-	// (in deliverMsg() if sub.client is a LEAF), so we make sure to prune
-	// from only one go routine at a time.
-	if !atomic.CompareAndSwapInt32(&c.perms.prun, 0, 1) {
-		return
-	}
-	const maxPruneAtOnce = 1000
-	r := 0
-	c.perms.pcache.Range(func(k, _ interface{}) bool {
-		c.perms.pcache.Delete(k)
-		if r++; (r > pruneSize && atomic.LoadInt32(&c.perms.pcsz) < int32(maxPermCacheSize)) ||
-			(r > maxPruneAtOnce) {
-			return false
-		}
-		return true
-	})
-	atomic.AddInt32(&c.perms.pcsz, -int32(r))
-	atomic.StoreInt32(&c.perms.prun, 0)
-}
-
-// pubAllowed checks on publish permissioning.
-// Lock should not be held.
-func (c *client) pubAllowed(subject string) bool {
-	return c.pubAllowedFullCheck(subject, true, false)
-}
-
-// pubAllowedFullCheck checks on all publish permissioning depending
-// on the flag for dynamic reply permissions.
-func (c *client) pubAllowedFullCheck(subject string, fullCheck, hasLock bool) bool {
-	if c.perms == nil || (c.perms.pub.allow == nil && c.perms.pub.deny == nil) {
-		return true
-	}
-	// Check if published subject is allowed if we have permissions in place.
-	v, ok := c.perms.pcache.Load(subject)
-	if ok {
-		return v.(bool)
-	}
-	allowed := true
-	// Cache miss, check allow then deny as needed.
-	if c.perms.pub.allow != nil {
-		r := c.perms.pub.allow.Match(subject)
-		allowed = len(r.psubs) != 0
-	}
-	// If we have a deny list and are currently allowed, check that as well.
-	if allowed && c.perms.pub.deny != nil {
-		r := c.perms.pub.deny.Match(subject)
-		allowed = len(r.psubs) == 0
-	}
-
-	// If we are currently not allowed but we are tracking reply subjects
-	// dynamically, check to see if we are allowed here but avoid pcache.
-	// We need to acquire the lock though.
-	if !allowed && fullCheck && c.perms.resp != nil {
-		if !hasLock {
-			c.mu.Lock()
-		}
-		if resp := c.replies[subject]; resp != nil {
-			resp.n++
-			// Check if we have sent too many responses.
-			if c.perms.resp.MaxMsgs > 0 && resp.n > c.perms.resp.MaxMsgs {
-				delete(c.replies, subject)
-			} else if c.perms.resp.Expires > 0 && time.Since(resp.t) > c.perms.resp.Expires {
-				delete(c.replies, subject)
-			} else {
-				allowed = true
-			}
-		}
-		if !hasLock {
-			c.mu.Unlock()
-		}
-	} else {
-		// Update our cache here.
-		c.perms.pcache.Store(string(subject), allowed)
-		if n := atomic.AddInt32(&c.perms.pcsz, 1); n > maxPermCacheSize {
-			c.prunePubPermsCache()
-		}
-	}
-	return allowed
 }
 
 // Test whether a reply subject is a service import reply.
@@ -3450,12 +3143,6 @@ func (c *client) processInboundClientMsg(msg []byte) (bool, bool) {
 	// Mostly under testing scenarios.
 	if c.srv == nil || c.acc == nil {
 		return false, false
-	}
-
-	// Check pub permissions
-	if c.perms != nil && (c.perms.pub.allow != nil || c.perms.pub.deny != nil) && !c.pubAllowed(string(c.pa.subject)) {
-		c.pubPermissionViolation(c.pa.subject)
-		return false, true
 	}
 
 	// Now check for reserved replies. These are used for service imports.
@@ -4561,11 +4248,10 @@ func (c *client) swapAccountAfterReload() {
 func (c *client) processSubsOnConfigReload(awcsti map[string]struct{}) {
 	c.mu.Lock()
 	var (
-		checkPerms = c.perms != nil
-		checkAcc   = c.acc != nil
-		acc        = c.acc
+		checkAcc = c.acc != nil
+		acc      = c.acc
 	)
-	if !checkPerms && !checkAcc {
+	if !checkAcc {
 		c.mu.Unlock()
 		return
 	}

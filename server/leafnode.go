@@ -97,7 +97,6 @@ type leafNodeCfg struct {
 	tlsName   string
 	username  string
 	password  string
-	perms     *Permissions
 	connDelay time.Duration // Delay before a connect, could be used while detecting loop condition, etc..
 }
 
@@ -341,14 +340,7 @@ func newLeafNodeCfg(remote *RemoteLeafOpts) *leafNodeCfg {
 		urls:           make([]*url.URL, 0, len(remote.URLs)),
 	}
 	if len(remote.DenyExports) > 0 || len(remote.DenyImports) > 0 {
-		perms := &Permissions{}
-		if len(remote.DenyExports) > 0 {
-			perms.Publish = &SubjectPermission{Deny: remote.DenyExports}
-		}
-		if len(remote.DenyImports) > 0 {
-			perms.Subscribe = &SubjectPermission{Deny: remote.DenyImports}
-		}
-		cfg.perms = perms
+
 	}
 	// Start with the one that is configured. We will add to this
 	// array when receiving async leafnode INFOs.
@@ -846,7 +838,6 @@ func (s *Server) createLeafNode(conn net.Conn, rURL *url.URL, remote *leafNodeCf
 		solicited = true
 		remote.Lock()
 		c.leaf.remote = remote
-		c.setPermissions(remote.perms)
 		if !c.leaf.remote.Hub {
 			c.leaf.isSpoke = true
 		}
@@ -1008,30 +999,6 @@ func (c *client) processLeafnodeInfo(info *Info) {
 		// Consider the incoming array as the most up-to-date
 		// representation of the remote cluster's list of URLs.
 		c.updateLeafNodeURLs(info)
-	}
-
-	// Check to see if we have permissions updates here.
-	if info.Import != nil || info.Export != nil {
-		perms := &Permissions{
-			Publish:   info.Export,
-			Subscribe: info.Import,
-		}
-		// Check if we have local deny clauses that we need to merge.
-		if remote := c.leaf.remote; remote != nil {
-			if len(remote.DenyExports) > 0 {
-				if perms.Publish == nil {
-					perms.Publish = &SubjectPermission{}
-				}
-				perms.Publish.Deny = append(perms.Publish.Deny, remote.DenyExports...)
-			}
-			if len(remote.DenyImports) > 0 {
-				if perms.Subscribe == nil {
-					perms.Subscribe = &SubjectPermission{}
-				}
-				perms.Subscribe.Deny = append(perms.Subscribe.Deny, remote.DenyImports...)
-			}
-		}
-		c.setPermissions(perms)
 	}
 
 	var resumeConnect bool
@@ -1250,7 +1217,6 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 		if acc != nil && acc == sysAcc {
 			c.Noticef("System Account Connected from %s", srvDecorated())
 			c.Noticef("JetStream Not Extended, adding denies %+v", denyAllJs)
-			c.mergeDenyPermissionsLocked(both, denyAllJs)
 			// When a remote with a system account is present in a server, unless otherwise disabled, the server will be
 			// started in observer mode. Now that it is clear that this not used, turn the observer mode off.
 			if solicited && meta != nil && meta.isObserver() {
@@ -1265,7 +1231,6 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 			}
 		} else {
 			c.Noticef("JetStream Not Extended, adding deny %+v for account %q", denyAllClientJs, accName)
-			c.mergeDenyPermissionsLocked(both, denyAllClientJs)
 		}
 		blockMappingOutgoing = true
 	} else if acc == sysAcc {
@@ -1288,7 +1253,6 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 		// So in order to prevent duplicate delivery (from system and actual account) suppress it on the account.
 		// If the system account is NOT shared, jsAllAPI traffic has no business
 		c.Noticef("Adding deny %+v for account %q", denyAllClientJs, accName)
-		c.mergeDenyPermissionsLocked(both, denyAllClientJs)
 	}
 	// If we have a specified JetStream domain we will want to add a mapping to
 	// allow access cross domain for each non-system account.
@@ -1307,7 +1271,6 @@ func (s *Server) addLeafNodeConnection(c *client, srvName, clusterName string, c
 			// of this issue, not all of them.
 			// This guards against a hub and a spoke having the same domain name.
 			// But not two spokes having the same one and the request coming from the hub.
-			c.mergeDenyPermissionsLocked(pub, []string{src})
 			c.Noticef("Adding deny %q for outgoing messages to account %q", src, accName)
 		}
 	}
@@ -1433,21 +1396,12 @@ func (c *client) processLeafNodeConnect(s *Server, arg []byte, lang string) erro
 
 	// When a leaf solicits a connection to a hub, the perms that it will use on the soliciting leafnode's
 	// behalf are correct for them, but inside the hub need to be reversed since data is flowing in the opposite direction.
-	if !c.isSolicitedLeafNode() && c.perms != nil {
-		sp, pp := c.perms.sub, c.perms.pub
-		c.perms.sub, c.perms.pub = pp, sp
-		if c.opts.Import != nil {
-			c.darray = c.opts.Import.Deny
-		} else {
-			c.darray = nil
-		}
+	if !c.isSolicitedLeafNode() {
+		c.darray = nil
 	}
 
 	// Set the Ping timer
 	c.setFirstPingTimer()
-
-	// If we received pub deny permissions from the other end, merge with existing ones.
-	c.mergeDenyPermissions(pub, proto.DenyPub)
 
 	c.mu.Unlock()
 
@@ -1484,8 +1438,7 @@ func (s *Server) sendPermsAndAccountInfo(c *client) {
 	info := s.copyLeafNodeInfo()
 	c.mu.Lock()
 	info.CID = c.cid
-	info.Import = c.opts.Import
-	info.Export = c.opts.Export
+
 	info.RemoteAccount = c.acc.Name
 	info.ConnectInfo = true
 	b, _ := json.Marshal(info)
@@ -1881,7 +1834,7 @@ func (c *client) processLeafSub(argo []byte) (err error) {
 	}
 
 	// If we are a hub check that we can publish to this subject.
-	if checkPerms && subjectIsLiteral(string(sub.subject)) && !c.pubAllowedFullCheck(string(sub.subject), true, true) {
+	if checkPerms && subjectIsLiteral(string(sub.subject)) {
 		c.mu.Unlock()
 		c.leafSubPermViolation(sub.subject)
 		return nil

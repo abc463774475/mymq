@@ -484,7 +484,6 @@ func (c *client) processRouteInfo(info *Info) {
 	// FIXME(dlc) - Add account scoping.
 	gacc := c.srv.globalAccount()
 	gacc.mu.RLock()
-	sl := gacc.sl
 	gacc.mu.RUnlock()
 
 	supportsHeaders := c.srv.supportsHeaders()
@@ -560,9 +559,7 @@ func (c *client) processRouteInfo(info *Info) {
 		if info.LameDuckMode {
 			connectURLs = c.route.connectURLs
 		} else {
-			// If this is an update due to config reload on the remote server,
-			// need to possibly send local subs to the remote server.
-			c.updateRemoteRoutePerms(sl, info)
+
 		}
 		c.mu.Unlock()
 
@@ -612,10 +609,6 @@ func (c *client) processRouteInfo(info *Info) {
 	// Use getGWHash since we don't use the same hash len for that
 	// for backward compatibility.
 	c.route.idHash = string(getGWHash(info.ID))
-
-	// Copy over permissions as well.
-	c.opts.Import = info.Import
-	c.opts.Export = info.Export
 
 	// If we do not know this route's URL, construct one on the fly
 	// from the information provided.
@@ -684,41 +677,6 @@ func (c *client) processRouteInfo(info *Info) {
 		c.Debugf("Detected duplicate remote route %q", info.ID)
 		c.closeConnection(DuplicateRoute)
 	}
-}
-
-// Possibly sends local subscriptions interest to this route
-// based on changes in the remote's Export permissions.
-// Lock assumed held on entry
-func (c *client) updateRemoteRoutePerms(sl *Sublist, info *Info) {
-	// Interested only on Export permissions for the remote server.
-	// Create "fake" clients that we will use to check permissions
-	// using the old permissions...
-	oldPerms := &RoutePermissions{Export: c.opts.Export}
-	oldPermsTester := &client{}
-	oldPermsTester.setRoutePermissions(oldPerms)
-	// and the new ones.
-	newPerms := &RoutePermissions{Export: info.Export}
-	newPermsTester := &client{}
-	newPermsTester.setRoutePermissions(newPerms)
-
-	c.opts.Import = info.Import
-	c.opts.Export = info.Export
-
-	var (
-		_localSubs [4096]*subscription
-		localSubs  = _localSubs[:0]
-	)
-	sl.localSubs(&localSubs, false)
-
-	c.sendRouteSubProtos(localSubs, false, func(sub *subscription) bool {
-		subj := string(sub.subject)
-		// If the remote can now export but could not before, and this server can import this
-		// subject, then send SUB protocol.
-		if newPermsTester.canExport(subj) && !oldPermsTester.canExport(subj) && c.canImport(subj) {
-			return true
-		}
-		return false
-	})
 }
 
 // sendAsyncInfoToClients sends an INFO protocol to all
@@ -828,9 +786,7 @@ func (s *Server) forwardNewRouteInfoToKnownServers(info *Info) {
 // This is for ROUTER connections only.
 // Lock is held on entry.
 func (c *client) canImport(subject string) bool {
-	// Use pubAllowed() since this checks Publish permissions which
-	// is what Import maps to.
-	return c.pubAllowedFullCheck(subject, false, true)
+	return true
 }
 
 // canExport is whether or not we will accept a SUB from the remote for a given subject.
@@ -840,27 +796,6 @@ func (c *client) canExport(subject string) bool {
 	// Use canSubscribe() since this checks Subscribe permissions which
 	// is what Export maps to.
 	return c.canSubscribe(subject)
-}
-
-// Initialize or reset cluster's permissions.
-// This is for ROUTER connections only.
-// Client lock is held on entry
-func (c *client) setRoutePermissions(perms *RoutePermissions) {
-	// Reset if some were set
-	if perms == nil {
-		c.perms = nil
-		c.mperms = nil
-		return
-	}
-	// Convert route permissions to user permissions.
-	// The Import permission is mapped to Publish
-	// and Export permission is mapped to Subscribe.
-	// For meaning of Import/Export, see canImport and canExport.
-	p := &Permissions{
-		Publish:   perms.Import,
-		Subscribe: perms.Export,
-	}
-	c.setPermissions(p)
 }
 
 // Type used to hold a list of subs on a per account basis.
@@ -1338,9 +1273,6 @@ func (s *Server) createRoute(conn net.Conn, rURL *url.URL) *client {
 	// Initialize the per-account cache.
 	c.in.pacache = make(map[string]*perAccountCache)
 	if didSolicit {
-		// Set permissions associated with the route user (if applicable).
-		// No lock needed since we are already under client lock.
-		c.setRoutePermissions(opts.Cluster.Permissions)
 	}
 
 	// Set the Ping timer
@@ -1705,11 +1637,6 @@ func (s *Server) startRouteAcceptLoop() {
 	if opts.Cluster.Username != "" {
 		info.AuthRequired = true
 	}
-	// Check for permissions.
-	if opts.Cluster.Permissions != nil {
-		info.Import = opts.Cluster.Permissions.Import
-		info.Export = opts.Cluster.Permissions.Export
-	}
 	// If this server has a LeafNode accept loop, s.leafNodeInfo.IP is,
 	// at this point, set to the host:port for the leafnode accept URL,
 	// taking into account possible advertise setting. Use the LeafNodeURLs
@@ -1922,11 +1849,6 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 		c.closeConnection(WrongGateway)
 		return ErrWrongGateway
 	}
-	var perms *RoutePermissions
-	//TODO this check indicates srv may be nil. see srv usage below
-	if srv != nil {
-		perms = srv.getOpts().Cluster.Permissions
-	}
 
 	clusterName := srv.ClusterName()
 
@@ -1960,7 +1882,6 @@ func (c *client) processRouteConnect(srv *Server, arg []byte, lang string) error
 	c.mu.Lock()
 	c.route.remoteID = c.opts.Name
 	c.route.lnoc = proto.LNOC
-	c.setRoutePermissions(perms)
 	c.headers = supportsHeaders && proto.Headers
 	c.mu.Unlock()
 	return nil

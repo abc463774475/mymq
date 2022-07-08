@@ -15,51 +15,23 @@ package server
 
 import (
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
-	"net"
-	"net/url"
-	"regexp"
-	"strings"
-	"sync/atomic"
-	"time"
-
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/internal/ldap"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
+	"net/url"
+	"regexp"
+	"strings"
+	"sync/atomic"
 )
-
-// Authentication is an interface for implementing authentication
-type Authentication interface {
-	// Check if a client is authorized to connect
-	Check(c ClientAuthentication) bool
-}
-
-// ClientAuthentication is an interface for client authentication
-type ClientAuthentication interface {
-	// GetOpts gets options associated with a client
-	GetOpts() *ClientOpts
-	// GetTLSConnectionState if TLS is enabled, TLS ConnectionState, nil otherwise
-	GetTLSConnectionState() *tls.ConnectionState
-	// RegisterUser optionally map a user after auth.
-	RegisterUser(*User)
-	// RemoteAddress expose the connection information of the client
-	RemoteAddress() net.Addr
-	// GetNonce is the nonce presented to the user in the INFO line
-	GetNonce() []byte
-	// Kind indicates what type of connection this is matching defined constants like CLIENT, ROUTER, GATEWAY, LEAF etc
-	Kind() int
-}
 
 // NkeyUser is for multiple nkey based users
 type NkeyUser struct {
 	Nkey                   string              `json:"user"`
-	Permissions            *Permissions        `json:"permissions,omitempty"`
 	Account                *Account            `json:"account,omitempty"`
 	SigningKey             string              `json:"signing_key,omitempty"`
 	AllowedConnectionTypes map[string]struct{} `json:"connection_types,omitempty"`
@@ -69,7 +41,6 @@ type NkeyUser struct {
 type User struct {
 	Username               string              `json:"user"`
 	Password               string              `json:"password"`
-	Permissions            *Permissions        `json:"permissions,omitempty"`
 	Account                *Account            `json:"account,omitempty"`
 	AllowedConnectionTypes map[string]struct{} `json:"connection_types,omitempty"`
 }
@@ -82,7 +53,6 @@ func (u *User) clone() *User {
 	}
 	clone := &User{}
 	*clone = *u
-	clone.Permissions = u.Permissions.clone()
 	return clone
 }
 
@@ -94,76 +64,6 @@ func (n *NkeyUser) clone() *NkeyUser {
 	}
 	clone := &NkeyUser{}
 	*clone = *n
-	clone.Permissions = n.Permissions.clone()
-	return clone
-}
-
-// SubjectPermission is an individual allow and deny struct for publish
-// and subscribe authorizations.
-type SubjectPermission struct {
-	Allow []string `json:"allow,omitempty"`
-	Deny  []string `json:"deny,omitempty"`
-}
-
-// ResponsePermission can be used to allow responses to any reply subject
-// that is received on a valid subscription.
-type ResponsePermission struct {
-	MaxMsgs int           `json:"max"`
-	Expires time.Duration `json:"ttl"`
-}
-
-// Permissions are the allowed subjects on a per
-// publish or subscribe basis.
-type Permissions struct {
-	Publish   *SubjectPermission  `json:"publish"`
-	Subscribe *SubjectPermission  `json:"subscribe"`
-	Response  *ResponsePermission `json:"responses,omitempty"`
-}
-
-// RoutePermissions are similar to user permissions
-// but describe what a server can import/export from and to
-// another server.
-type RoutePermissions struct {
-	Import *SubjectPermission `json:"import"`
-	Export *SubjectPermission `json:"export"`
-}
-
-// clone will clone an individual subject permission.
-func (p *SubjectPermission) clone() *SubjectPermission {
-	if p == nil {
-		return nil
-	}
-	clone := &SubjectPermission{}
-	if p.Allow != nil {
-		clone.Allow = make([]string, len(p.Allow))
-		copy(clone.Allow, p.Allow)
-	}
-	if p.Deny != nil {
-		clone.Deny = make([]string, len(p.Deny))
-		copy(clone.Deny, p.Deny)
-	}
-	return clone
-}
-
-// clone performs a deep copy of the Permissions struct, returning a new clone
-// with all values copied.
-func (p *Permissions) clone() *Permissions {
-	if p == nil {
-		return nil
-	}
-	clone := &Permissions{}
-	if p.Publish != nil {
-		clone.Publish = p.Publish.clone()
-	}
-	if p.Subscribe != nil {
-		clone.Subscribe = p.Subscribe.clone()
-	}
-	if p.Response != nil {
-		clone.Response = &ResponsePermission{
-			MaxMsgs: p.Response.MaxMsgs,
-			Expires: p.Response.Expires,
-		}
-	}
 	return clone
 }
 
@@ -211,58 +111,6 @@ func (s *Server) assignGlobalAccountToOrphanUsers(nkeys map[string]*NkeyUser, us
 	}
 }
 
-// If the given permissions has a ResponsePermission
-// set, ensure that defaults are set (if values are 0)
-// and that a Publish permission is set, and Allow
-// is disabled if not explicitly set.
-func validateResponsePermissions(p *Permissions) {
-	if p == nil || p.Response == nil {
-		return
-	}
-	if p.Publish == nil {
-		p.Publish = &SubjectPermission{}
-	}
-	if p.Publish.Allow == nil {
-		// We turn off the blanket allow statement.
-		p.Publish.Allow = []string{}
-	}
-	// If there is a response permission, ensure
-	// that if value is 0, we set the default value.
-	if p.Response.MaxMsgs == 0 {
-		p.Response.MaxMsgs = DEFAULT_ALLOW_RESPONSE_MAX_MSGS
-	}
-	if p.Response.Expires == 0 {
-		p.Response.Expires = DEFAULT_ALLOW_RESPONSE_EXPIRATION
-	}
-}
-
-// configureAuthorization will do any setup needed for authorization.
-// Lock is assumed held.
-func (s *Server) configureAuthorization() {
-	opts := s.getOpts()
-	if opts == nil {
-		return
-	}
-
-	// Check for multiple users first
-	// This just checks and sets up the user map if we have multiple users.
-	if opts.CustomClientAuthentication != nil {
-		s.info.AuthRequired = true
-	} else if s.trustedKeys != nil {
-		s.info.AuthRequired = true
-	} else if opts.Nkeys != nil || opts.Users != nil {
-		s.nkeys, s.users = s.buildNkeysAndUsersFromOptions(opts.Nkeys, opts.Users)
-		s.info.AuthRequired = true
-	} else if opts.Username != "" || opts.Authorization != "" {
-		s.info.AuthRequired = true
-	} else {
-		s.users = nil
-		s.nkeys = nil
-		s.info.AuthRequired = false
-	}
-
-}
-
 // Takes the given slices of NkeyUser and User options and build
 // corresponding maps used by the server. The users are cloned
 // so that server does not reference options.
@@ -282,9 +130,6 @@ func (s *Server) buildNkeysAndUsersFromOptions(nko []*NkeyUser, uo []*User) (map
 					copy.Account = v.(*Account)
 				}
 			}
-			if copy.Permissions != nil {
-				validateResponsePermissions(copy.Permissions)
-			}
 			nkeys[u.Nkey] = copy
 		}
 	}
@@ -297,55 +142,11 @@ func (s *Server) buildNkeysAndUsersFromOptions(nko []*NkeyUser, uo []*User) (map
 					copy.Account = v.(*Account)
 				}
 			}
-			if copy.Permissions != nil {
-				validateResponsePermissions(copy.Permissions)
-			}
 			users[u.Username] = copy
 		}
 	}
 	s.assignGlobalAccountToOrphanUsers(nkeys, users)
 	return nkeys, users
-}
-
-// checkAuthentication will check based on client type and
-// return boolean indicating if client is authorized.
-func (s *Server) checkAuthentication(c *client) bool {
-	switch c.kind {
-	case CLIENT:
-		return s.isClientAuthorized(c)
-	case ROUTER:
-		return s.isRouterAuthorized(c)
-	case GATEWAY:
-		return s.isGatewayAuthorized(c)
-	case LEAF:
-		return s.isLeafNodeAuthorized(c)
-	default:
-		return false
-	}
-}
-
-// isClientAuthorized will check the client against the proper authorization method and data.
-// This could be nkey, token, or username/password based.
-func (s *Server) isClientAuthorized(c *client) bool {
-	opts := s.getOpts()
-
-	// Check custom auth first, then jwts, then nkeys, then
-	// multiple users with TLS map if enabled, then token,
-	// then single user/pass.
-	if opts.CustomClientAuthentication != nil && !opts.CustomClientAuthentication.Check(c) {
-		return false
-	}
-
-	if opts.CustomClientAuthentication == nil && !s.processClientOrLeafAuthentication(c, opts) {
-		return false
-	}
-
-	if c.kind == CLIENT || c.kind == LEAF {
-		// Generate an event if we have a system account.
-		s.accountConnectEvent(c)
-	}
-
-	return true
 }
 
 // returns false if the client needs to be disconnected
@@ -632,27 +433,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			return false
 		}
 
-		// Warn about JetStream restrictions
-		if c.perms != nil {
-			deniedPub := []string{}
-			deniedSub := []string{}
-			for _, sub := range denyAllJs {
-				if c.perms.pub.deny != nil {
-					if r := c.perms.pub.deny.Match(sub); len(r.psubs)+len(r.qsubs) > 0 {
-						deniedPub = append(deniedPub, sub)
-					}
-				}
-				if c.perms.sub.deny != nil {
-					if r := c.perms.sub.deny.Match(sub); len(r.psubs)+len(r.qsubs) > 0 {
-						deniedSub = append(deniedSub, sub)
-					}
-				}
-			}
-			if len(deniedPub) > 0 || len(deniedSub) > 0 {
-				c.Noticef("Connected %s has JetStream denied on pub: %v sub: %v", c.kindString(), deniedPub, deniedSub)
-			}
-		}
-
 		// Hold onto the user's public key.
 		c.mu.Lock()
 		c.pubKey = juc.Subject
@@ -875,83 +655,6 @@ URLS:
 	return false
 }
 
-// checkRouterAuth checks optional router authorization which can be nil or username/password.
-func (s *Server) isRouterAuthorized(c *client) bool {
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	// Check custom auth first, then TLS map if enabled
-	// then single user/pass.
-	if s.opts.CustomRouterAuthentication != nil {
-		return s.opts.CustomRouterAuthentication.Check(c)
-	}
-
-	if opts.Cluster.TLSMap || opts.Cluster.TLSCheckKnownURLs {
-		return checkClientTLSCertSubject(c, func(user string, _ *ldap.DN, isDNSAltName bool) (string, bool) {
-			if user == "" {
-				return "", false
-			}
-			if opts.Cluster.TLSCheckKnownURLs && isDNSAltName {
-				if dnsAltNameMatches(dnsAltNameLabels(user), opts.Routes) {
-					return "", true
-				}
-			}
-			if opts.Cluster.TLSMap && opts.Cluster.Username == user {
-				return "", true
-			}
-			return "", false
-		})
-	}
-
-	if opts.Cluster.Username == "" {
-		return true
-	}
-
-	if opts.Cluster.Username != c.opts.Username {
-		return false
-	}
-	if !comparePasswords(opts.Cluster.Password, c.opts.Password) {
-		return false
-	}
-	return true
-}
-
-// isGatewayAuthorized checks optional gateway authorization which can be nil or username/password.
-func (s *Server) isGatewayAuthorized(c *client) bool {
-	// Snapshot server options.
-	opts := s.getOpts()
-
-	// Check whether TLS map is enabled, otherwise use single user/pass.
-	if opts.Gateway.TLSMap || opts.Gateway.TLSCheckKnownURLs {
-		return checkClientTLSCertSubject(c, func(user string, _ *ldap.DN, isDNSAltName bool) (string, bool) {
-			if user == "" {
-				return "", false
-			}
-			if opts.Gateway.TLSCheckKnownURLs && isDNSAltName {
-				labels := dnsAltNameLabels(user)
-				for _, gw := range opts.Gateway.Gateways {
-					if gw != nil && dnsAltNameMatches(labels, gw.URLs) {
-						return "", true
-					}
-				}
-			}
-			if opts.Gateway.TLSMap && opts.Gateway.Username == user {
-				return "", true
-			}
-			return "", false
-		})
-	}
-
-	if opts.Gateway.Username == "" {
-		return true
-	}
-
-	if opts.Gateway.Username != c.opts.Username {
-		return false
-	}
-	return comparePasswords(opts.Gateway.Password, c.opts.Password)
-}
-
 func (s *Server) registerLeafWithAccount(c *client, account string) bool {
 	var err error
 	acc := s.globalAccount()
@@ -967,76 +670,6 @@ func (s *Server) registerLeafWithAccount(c *client, account string) bool {
 		return false
 	}
 	return true
-}
-
-// isLeafNodeAuthorized will check for auth for an inbound leaf node connection.
-func (s *Server) isLeafNodeAuthorized(c *client) bool {
-	opts := s.getOpts()
-
-	isAuthorized := func(username, password, account string) bool {
-		if username != c.opts.Username {
-			return false
-		}
-		if !comparePasswords(password, c.opts.Password) {
-			return false
-		}
-		return s.registerLeafWithAccount(c, account)
-	}
-
-	// If leafnodes config has an authorization{} stanza, this takes precedence.
-	// The user in CONNECT must match. We will bind to the account associated
-	// with that user (from the leafnode's authorization{} config).
-	if opts.LeafNode.Username != _EMPTY_ {
-		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
-	} else if len(opts.LeafNode.Users) > 0 {
-		if opts.LeafNode.TLSMap {
-			var user *User
-			found := checkClientTLSCertSubject(c, func(u string, _ *ldap.DN, _ bool) (string, bool) {
-				// This is expected to be a very small array.
-				for _, usr := range opts.LeafNode.Users {
-					if u == usr.Username {
-						user = usr
-						return u, true
-					}
-				}
-				return _EMPTY_, false
-			})
-			if !found {
-				return false
-			}
-			if c.opts.Username != _EMPTY_ {
-				s.Warnf("User %q found in connect proto, but user required from cert", c.opts.Username)
-			}
-			c.opts.Username = user.Username
-			// EMPTY will result in $G
-			accName := _EMPTY_
-			if user.Account != nil {
-				accName = user.Account.GetName()
-			}
-			// This will authorize since are using an existing user,
-			// but it will also register with proper account.
-			return isAuthorized(user.Username, user.Password, accName)
-		}
-
-		// This is expected to be a very small array.
-		for _, u := range opts.LeafNode.Users {
-			if u.Username == c.opts.Username {
-				var accName string
-				if u.Account != nil {
-					accName = u.Account.Name
-				}
-				return isAuthorized(u.Username, u.Password, accName)
-			}
-		}
-		return false
-	}
-
-	// We are here if we accept leafnode connections without any credentials.
-
-	// Still, if the CONNECT has some user info, we will bind to the
-	// user's account or to the specified default account (if provided)
-	// or to the global account.
-	return s.isClientAuthorized(c)
 }
 
 // Support for bcrypt stored passwords and tokens.
@@ -1061,58 +694,4 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 		return false
 	}
 	return true
-}
-
-func validateAuth(o *Options) error {
-	if err := validatePinnedCerts(o.TLSPinnedCerts); err != nil {
-		return err
-	}
-	for _, u := range o.Users {
-		if err := validateAllowedConnectionTypes(u.AllowedConnectionTypes); err != nil {
-			return err
-		}
-	}
-	for _, u := range o.Nkeys {
-		if err := validateAllowedConnectionTypes(u.AllowedConnectionTypes); err != nil {
-			return err
-		}
-	}
-	return validateNoAuthUser(o, o.NoAuthUser)
-}
-
-func validateAllowedConnectionTypes(m map[string]struct{}) error {
-	for ct := range m {
-		ctuc := strings.ToUpper(ct)
-		switch ctuc {
-		case jwt.ConnectionTypeStandard,
-			jwt.ConnectionTypeLeafnode:
-		default:
-			return fmt.Errorf("unknown connection type %q", ct)
-		}
-		if ctuc != ct {
-			delete(m, ct)
-			m[ctuc] = struct{}{}
-		}
-	}
-	return nil
-}
-
-func validateNoAuthUser(o *Options, noAuthUser string) error {
-	if noAuthUser == _EMPTY_ {
-		return nil
-	}
-	if len(o.TrustedOperators) > 0 {
-		return fmt.Errorf("no_auth_user not compatible with Trusted Operator")
-	}
-	if o.Users == nil {
-		return fmt.Errorf(`no_auth_user: "%s" present, but users are not defined`, noAuthUser)
-	}
-	for _, u := range o.Users {
-		if u.Username == noAuthUser {
-			return nil
-		}
-	}
-	return fmt.Errorf(
-		`no_auth_user: "%s" not present as user in authorization block or account configuration`,
-		noAuthUser)
 }

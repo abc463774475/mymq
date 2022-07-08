@@ -85,12 +85,9 @@ type Info struct {
 
 	LameDuckMode bool `json:"ldm,omitempty"`
 
-	// Route Specific
-	Import        *SubjectPermission `json:"import,omitempty"`
-	Export        *SubjectPermission `json:"export,omitempty"`
-	LNOC          bool               `json:"lnoc,omitempty"`
-	InfoOnConnect bool               `json:"info_on_connect,omitempty"` // When true the server will respond to CONNECT with an INFO
-	ConnectInfo   bool               `json:"connect_info,omitempty"`    // When true this is the server INFO response to CONNECT
+	LNOC          bool `json:"lnoc,omitempty"`
+	InfoOnConnect bool `json:"info_on_connect,omitempty"` // When true the server will respond to CONNECT with an INFO
+	ConnectInfo   bool `json:"connect_info,omitempty"`    // When true this is the server INFO response to CONNECT
 
 	// Gateways Specific
 	Gateway           string   `json:"gateway,omitempty"`             // Name of the origin Gateway (sent by gateway's INFO)
@@ -542,9 +539,6 @@ func NewServer(opts *Options) (*Server, error) {
 		return nil, err
 	}
 
-	// Used to setup Authorization.
-	s.configureAuthorization()
-
 	// Start signal handler
 	s.handleSignals()
 
@@ -685,10 +679,7 @@ func validateOptions(o *Options) error {
 	if err := validateLeafNode(o); err != nil {
 		return err
 	}
-	// Check that authentication is properly configured.
-	if err := validateAuth(o); err != nil {
-		return err
-	}
+
 	// Check that gateway is properly configured. Returns no error
 	// if there is no gateway defined.
 	if err := validateGatewayOptions(o); err != nil {
