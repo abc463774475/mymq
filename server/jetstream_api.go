@@ -726,7 +726,7 @@ func (js *jetStream) apiDispatch(sub *subscription, c *client, acc *Account, sub
 	jsub := rr.psubs[0]
 
 	// If this is directly from a client connection ok to do in place.
-	if c.kind != ROUTER && c.kind != GATEWAY {
+	if c.kind != ROUTER {
 		jsub.icb(sub, c, acc, subject, reply, rmsg)
 		return
 	}
@@ -934,7 +934,7 @@ const badAPIRequestT = "Malformed JetStream API Request: %q"
 func (a *Account) checkJetStream() (enabled, shouldError bool) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.js != nil, a.nleafs+a.nrleafs == 0
+	return a.js != nil, true
 }
 
 // Request for current usage and limits for this account.
@@ -1392,7 +1392,7 @@ func (s *Server) jsStreamUpdateRequest(sub *subscription, c *client, _ *Account,
 	if s.JetStreamIsClustered() {
 		// If we are inline with client, we still may need to do a callout for stream info
 		// during this call, so place in Go routine to not block client.
-		if c.kind != ROUTER && c.kind != GATEWAY {
+		if c.kind != ROUTER {
 			go s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, rmsg, &cfg, nil)
 		} else {
 			s.jsClusteredStreamUpdateRequest(ci, acc, subject, reply, rmsg, &cfg, nil)
@@ -2343,7 +2343,7 @@ func (s *Server) jsLeaderServerStreamMoveRequest(sub *subscription, c *client, _
 
 	// execute on a go routine for route or gateway, as this may block waiting from responses from other servers and
 	// therefore block all route/gateway traffic.
-	if c.kind != ROUTER && c.kind != GATEWAY {
+	if c.kind != ROUTER {
 		go s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)
 	} else {
 		s.jsClusteredStreamUpdateRequest(&ciNew, targetAcc.(*Account), subject, reply, rmsg, &cfg, peers)

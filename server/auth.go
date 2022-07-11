@@ -203,7 +203,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 
 		}
 	} else {
-		tlsMap = opts.LeafNode.TLSMap
 	}
 
 	if !ao {
@@ -308,7 +307,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			// but we set it here to be able to identify it in the logs.
 			c.opts.Username = user.Username
 		} else {
-			if (c.kind == CLIENT || c.kind == LEAF) && noAuthUser != _EMPTY_ &&
+			if (c.kind == CLIENT) && noAuthUser != _EMPTY_ &&
 				c.opts.Username == _EMPTY_ && c.opts.Password == _EMPTY_ && c.opts.Token == _EMPTY_ {
 				if u, exists := s.users[noAuthUser]; exists {
 					c.mu.Lock()
@@ -495,12 +494,6 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) boo
 			}
 			return comparePasswords(password, c.opts.Password)
 		}
-	} else if c.kind == LEAF {
-		// There is no required username/password to connect and
-		// there was no u/p in the CONNECT or none that matches the
-		// know users. Register the leaf connection with global account
-		// or the one specified in config (if provided).
-		return s.registerLeafWithAccount(c, opts.LeafNode.Account)
 	}
 	return false
 }

@@ -23,7 +23,6 @@ import (
 	"io/ioutil"
 	"math"
 	"math/rand"
-	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -297,24 +296,7 @@ func (s *Server) bootstrapRaftNode(cfg *RaftConfig, knownPeers []string, allPeer
 		opts := s.getOpts()
 		nrs := len(opts.Routes)
 
-		cn := s.ClusterName()
 		ngwps := 0
-		for _, gw := range opts.Gateway.Gateways {
-			// Ignore our own cluster if specified.
-			if gw.Name == cn {
-				continue
-			}
-			for _, u := range gw.URLs {
-				host := u.Hostname()
-				// If this is an IP just add one.
-				if net.ParseIP(host) != nil {
-					ngwps++
-				} else {
-					addrs, _ := net.LookupHost(host)
-					ngwps += len(addrs)
-				}
-			}
-		}
 
 		if expected < nrs+ngwps {
 			expected = nrs + ngwps
@@ -1564,17 +1546,11 @@ func (n *raft) run() {
 	s := n.s
 	defer s.grWG.Done()
 
-	// We want to wait for some routing to be enabled, so we will wait for
-	// at least a route, leaf or gateway connection to be established before
-	// starting the run loop.
-	gw := s.gateway
 	for {
 		s.mu.Lock()
-		ready := len(s.routes)+len(s.leafs) > 0
-		if !ready && gw.enabled {
-			gw.RLock()
-			ready = len(gw.out)+len(gw.in) > 0
-			gw.RUnlock()
+		ready := len(s.routes) > 0
+		if !ready {
+
 		}
 		s.mu.Unlock()
 		if !ready {

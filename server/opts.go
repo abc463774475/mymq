@@ -229,18 +229,17 @@ type Options struct {
 	MaxPayload            int32         `json:"max_payload"`
 	MaxPending            int64         `json:"max_pending"`
 	Cluster               ClusterOpts   `json:"cluster,omitempty"`
-	Gateway               GatewayOpts   `json:"gateway,omitempty"`
-	LeafNode              LeafNodeOpts  `json:"leaf,omitempty"`
-	JetStream             bool          `json:"jetstream"`
-	JetStreamMaxMemory    int64         `json:"-"`
-	JetStreamMaxStore     int64         `json:"-"`
-	JetStreamDomain       string        `json:"-"`
-	JetStreamExtHint      string        `json:"-"`
-	JetStreamKey          string        `json:"-"`
-	JetStreamUniqueTag    string
-	JetStreamLimits       JSLimitOpts
-	StoreDir              string            `json:"-"`
-	JsAccDefaultDomain    map[string]string `json:"-"` // account to domain name mapping
+
+	JetStream          bool   `json:"jetstream"`
+	JetStreamMaxMemory int64  `json:"-"`
+	JetStreamMaxStore  int64  `json:"-"`
+	JetStreamDomain    string `json:"-"`
+	JetStreamExtHint   string `json:"-"`
+	JetStreamKey       string `json:"-"`
+	JetStreamUniqueTag string
+	JetStreamLimits    JSLimitOpts
+	StoreDir           string            `json:"-"`
+	JsAccDefaultDomain map[string]string `json:"-"` // account to domain name mapping
 
 	ProfPort            int           `json:"-"`
 	PidFile             string        `json:"-"`
@@ -355,16 +354,7 @@ func (o *Options) Clone() *Options {
 	if o.Cluster.TLSConfig != nil {
 		clone.Cluster.TLSConfig = o.Cluster.TLSConfig.Clone()
 	}
-	if o.Gateway.TLSConfig != nil {
-		clone.Gateway.TLSConfig = o.Gateway.TLSConfig.Clone()
-	}
-	if len(o.Gateway.Gateways) > 0 {
-		clone.Gateway.Gateways = make([]*RemoteGatewayOpts, len(o.Gateway.Gateways))
-		for i, g := range o.Gateway.Gateways {
-			clone.Gateway.Gateways[i] = g.clone()
-		}
-	}
-	// FIXME(dlc) - clone leaf node stuff.
+
 	return clone
 }
 
@@ -662,17 +652,6 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.HTTPBasePath = v.(string)
 	case "cluster":
 		err := parseCluster(tk, o, errors, warnings)
-		if err != nil {
-			*errors = append(*errors, err)
-			return
-		}
-	case "gateway":
-		if err := parseGateway(tk, o, errors, warnings); err != nil {
-			*errors = append(*errors, err)
-			return
-		}
-	case "leaf", "leafnodes":
-		err := parseLeafNodes(tk, o, errors, warnings)
 		if err != nil {
 			*errors = append(*errors, err)
 			return
@@ -1329,74 +1308,6 @@ func parseURL(u string, typ string) (*url.URL, error) {
 	return url, nil
 }
 
-func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
-	if !ok {
-		return &configErr{tk, fmt.Sprintf("Expected gateway to be a map, got %T", v)}
-	}
-	for mk, mv := range gm {
-		// Again, unwrap token value if line check is required.
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "name":
-			o.Gateway.Name = mv.(string)
-		case "listen":
-			hp, err := parseListen(mv)
-			if err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			o.Gateway.Host = hp.host
-			o.Gateway.Port = hp.port
-		case "port":
-			o.Gateway.Port = int(mv.(int64))
-		case "host", "net":
-			o.Gateway.Host = mv.(string)
-		case "tls":
-			config, tlsopts, err := getTLSConfig(tk)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			o.Gateway.TLSConfig = config
-			o.Gateway.TLSTimeout = tlsopts.Timeout
-			o.Gateway.TLSMap = tlsopts.Map
-			o.Gateway.TLSCheckKnownURLs = tlsopts.TLSCheckKnownURLs
-			o.Gateway.TLSPinnedCerts = tlsopts.PinnedCerts
-			o.Gateway.tlsConfigOpts = tlsopts
-		case "advertise":
-			o.Gateway.Advertise = mv.(string)
-		case "connect_retries":
-			o.Gateway.ConnectRetries = int(mv.(int64))
-		case "gateways":
-			gateways, err := parseGateways(mv, errors, warnings)
-			if err != nil {
-				return err
-			}
-			o.Gateway.Gateways = gateways
-		case "reject_unknown", "reject_unknown_cluster":
-			o.Gateway.RejectUnknown = mv.(bool)
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-				continue
-			}
-		}
-	}
-	return nil
-}
-
 var dynamicJSAccountLimits = JetStreamAccountLimits{-1, -1, -1, -1, -1, -1, -1, false}
 var defaultJSAccountTiers = map[string]JetStreamAccountLimits{_EMPTY_: dynamicJSAccountLimits}
 
@@ -1651,326 +1562,6 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 	return nil
 }
 
-// parseLeafNodes will parse the leaf node config.
-func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	cm, ok := v.(map[string]interface{})
-	if !ok {
-		return &configErr{tk, fmt.Sprintf("Expected map to define a leafnode, got %T", v)}
-	}
-
-	for mk, mv := range cm {
-		// Again, unwrap token value if line check is required.
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "listen":
-			hp, err := parseListen(mv)
-			if err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.LeafNode.Host = hp.host
-			opts.LeafNode.Port = hp.port
-		case "port":
-			opts.LeafNode.Port = int(mv.(int64))
-		case "host", "net":
-			opts.LeafNode.Host = mv.(string)
-		case "authorization":
-			auth, err := parseLeafAuthorization(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.LeafNode.Username = auth.user
-			opts.LeafNode.Password = auth.pass
-			opts.LeafNode.AuthTimeout = auth.timeout
-			opts.LeafNode.Account = auth.acc
-			opts.LeafNode.Users = auth.users
-			// Validate user info config for leafnode authorization
-			if err := validateLeafNodeAuthOptions(opts); err != nil {
-				*errors = append(*errors, &configErr{tk, err.Error()})
-				continue
-			}
-		case "remotes":
-			// Parse the remote options here.
-			remotes, err := parseRemoteLeafNodes(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.LeafNode.Remotes = remotes
-		case "reconnect", "reconnect_delay", "reconnect_interval":
-			opts.LeafNode.ReconnectInterval = time.Duration(int(mv.(int64))) * time.Second
-		case "tls":
-			tc, err := parseTLS(tk, true)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			if opts.LeafNode.TLSConfig, err = GenTLSConfig(tc); err != nil {
-				err := &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.LeafNode.TLSTimeout = tc.Timeout
-			opts.LeafNode.TLSMap = tc.Map
-			opts.LeafNode.TLSPinnedCerts = tc.PinnedCerts
-			opts.LeafNode.tlsConfigOpts = tc
-		case "leafnode_advertise", "advertise":
-			opts.LeafNode.Advertise = mv.(string)
-		case "no_advertise":
-			opts.LeafNode.NoAdvertise = mv.(bool)
-			trackExplicitVal(opts, &opts.inConfig, "LeafNode.NoAdvertise", opts.LeafNode.NoAdvertise)
-		case "min_version", "minimum_version":
-			version := mv.(string)
-			if err := checkLeafMinVersionConfig(version); err != nil {
-				err = &configErr{tk, err.Error()}
-				*errors = append(*errors, err)
-				continue
-			}
-			opts.LeafNode.MinVersion = version
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-				continue
-			}
-		}
-	}
-	return nil
-}
-
-// This is the authorization parser adapter for the leafnode's
-// authorization config.
-func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (*authorization, error) {
-	var (
-		am   map[string]interface{}
-		tk   token
-		lt   token
-		auth = &authorization{}
-	)
-	defer convertPanicToErrorList(&lt, errors)
-
-	_, v = unwrapValue(v, &lt)
-	am = v.(map[string]interface{})
-	for mk, mv := range am {
-		tk, mv = unwrapValue(mv, &lt)
-		switch strings.ToLower(mk) {
-		case "user", "username":
-			auth.user = mv.(string)
-		case "pass", "password":
-			auth.pass = mv.(string)
-		case "timeout":
-			at := float64(1)
-			switch mv := mv.(type) {
-			case int64:
-				at = float64(mv)
-			case float64:
-				at = mv
-			}
-			auth.timeout = at
-		case "users":
-			users, err := parseLeafUsers(tk, errors, warnings)
-			if err != nil {
-				*errors = append(*errors, err)
-				continue
-			}
-			auth.users = users
-		case "account":
-			auth.acc = mv.(string)
-		default:
-			if !tk.IsUsedVariable() {
-				err := &unknownConfigFieldErr{
-					field: mk,
-					configErr: configErr{
-						token: tk,
-					},
-				}
-				*errors = append(*errors, err)
-			}
-			continue
-		}
-	}
-	return auth, nil
-}
-
-// This is a trimmed down version of parseUsers that is adapted
-// for the users possibly defined in the authorization{} section
-// of leafnodes {}.
-func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User, error) {
-	var (
-		tk    token
-		lt    token
-		users = []*User{}
-	)
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, mv = unwrapValue(mv, &lt)
-	// Make sure we have an array
-	uv, ok := mv.([]interface{})
-	if !ok {
-		return nil, &configErr{tk, fmt.Sprintf("Expected users field to be an array, got %v", mv)}
-	}
-	for _, u := range uv {
-		tk, u = unwrapValue(u, &lt)
-		// Check its a map/struct
-		um, ok := u.(map[string]interface{})
-		if !ok {
-			err := &configErr{tk, fmt.Sprintf("Expected user entry to be a map/struct, got %v", u)}
-			*errors = append(*errors, err)
-			continue
-		}
-		user := &User{}
-		for k, v := range um {
-			tk, v = unwrapValue(v, &lt)
-			switch strings.ToLower(k) {
-			case "user", "username":
-				user.Username = v.(string)
-			case "pass", "password":
-				user.Password = v.(string)
-			case "account":
-				// We really want to save just the account name here, but
-				// the User object is *Account. So we create an account object
-				// but it won't be registered anywhere. The server will just
-				// use opts.LeafNode.Users[].Account.Name. Alternatively
-				// we need to create internal objects to store u/p and account
-				// name and have a server structure to hold that.
-				user.Account = NewAccount(v.(string))
-			default:
-				if !tk.IsUsedVariable() {
-					err := &unknownConfigFieldErr{
-						field: k,
-						configErr: configErr{
-							token: tk,
-						},
-					}
-					*errors = append(*errors, err)
-					continue
-				}
-			}
-		}
-		users = append(users, user)
-	}
-	return users, nil
-}
-
-func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]*RemoteLeafOpts, error) {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-	tk, v := unwrapValue(v, &lt)
-	ra, ok := v.([]interface{})
-	if !ok {
-		return nil, &configErr{tk, fmt.Sprintf("Expected remotes field to be an array, got %T", v)}
-	}
-	remotes := make([]*RemoteLeafOpts, 0, len(ra))
-	for _, r := range ra {
-		tk, r = unwrapValue(r, &lt)
-		// Check its a map/struct
-		rm, ok := r.(map[string]interface{})
-		if !ok {
-			*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected remote leafnode entry to be a map/struct, got %v", r)})
-			continue
-		}
-		remote := &RemoteLeafOpts{}
-		for k, v := range rm {
-			tk, v = unwrapValue(v, &lt)
-			switch strings.ToLower(k) {
-			case "no_randomize", "dont_randomize":
-				remote.NoRandomize = v.(bool)
-			case "url", "urls":
-				switch v := v.(type) {
-				case []interface{}, []string:
-					urls, errs := parseURLs(v.([]interface{}), "leafnode", warnings)
-					if errs != nil {
-						*errors = append(*errors, errs...)
-						continue
-					}
-					remote.URLs = urls
-				case string:
-					url, err := parseURL(v, "leafnode")
-					if err != nil {
-						*errors = append(*errors, &configErr{tk, err.Error()})
-						continue
-					}
-					remote.URLs = append(remote.URLs, url)
-				default:
-					*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected remote leafnode url to be an array or string, got %v", v)})
-					continue
-				}
-			case "account", "local":
-				remote.LocalAccount = v.(string)
-			case "creds", "credentials":
-				p, err := expandPath(v.(string))
-				if err != nil {
-					*errors = append(*errors, &configErr{tk, err.Error()})
-					continue
-				}
-				remote.Credentials = p
-			case "tls":
-				tc, err := parseTLS(tk, true)
-				if err != nil {
-					*errors = append(*errors, err)
-					continue
-				}
-				if remote.TLSConfig, err = GenTLSConfig(tc); err != nil {
-					*errors = append(*errors, &configErr{tk, err.Error()})
-					continue
-				}
-				// If ca_file is defined, GenTLSConfig() sets TLSConfig.ClientCAs.
-				// Set RootCAs since this tls.Config is used when soliciting
-				// a connection (therefore behaves as a client).
-				remote.TLSConfig.RootCAs = remote.TLSConfig.ClientCAs
-				if tc.Timeout > 0 {
-					remote.TLSTimeout = tc.Timeout
-				} else {
-					remote.TLSTimeout = float64(DEFAULT_LEAF_TLS_TIMEOUT) / float64(time.Second)
-				}
-				remote.tlsConfigOpts = tc
-			case "hub":
-				remote.Hub = v.(bool)
-			case "deny_imports", "deny_import":
-				subjects, err := parsePermSubjects(tk, errors, warnings)
-				if err != nil {
-					*errors = append(*errors, err)
-					continue
-				}
-				remote.DenyImports = subjects
-			case "deny_exports", "deny_export":
-				subjects, err := parsePermSubjects(tk, errors, warnings)
-				if err != nil {
-					*errors = append(*errors, err)
-					continue
-				}
-				remote.DenyExports = subjects
-			case "jetstream_cluster_migrate", "js_cluster_migrate":
-				remote.JetStreamClusterMigrate = true
-			default:
-				if !tk.IsUsedVariable() {
-					err := &unknownConfigFieldErr{
-						field: k,
-						configErr: configErr{
-							token: tk,
-						},
-					}
-					*errors = append(*errors, err)
-					continue
-				}
-			}
-		}
-		remotes = append(remotes, remote)
-	}
-	return remotes, nil
-}
-
 // Parse TLS and returns a TLSConfig and TLSTimeout.
 // Used by cluster and gateway parsing.
 func getTLSConfig(tk token) (*tls.Config, *TLSConfigOpts, error) {
@@ -1989,72 +1580,6 @@ func getTLSConfig(tk token) (*tls.Config, *TLSConfigOpts, error) {
 	config.ClientAuth = tls.RequireAndVerifyClientCert
 	config.RootCAs = config.ClientCAs
 	return config, tc, nil
-}
-
-func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*RemoteGatewayOpts, error) {
-	var lt token
-	defer convertPanicToErrorList(&lt, errors)
-
-	tk, v := unwrapValue(v, &lt)
-	// Make sure we have an array
-	ga, ok := v.([]interface{})
-	if !ok {
-		return nil, &configErr{tk, fmt.Sprintf("Expected gateways field to be an array, got %T", v)}
-	}
-	gateways := []*RemoteGatewayOpts{}
-	for _, g := range ga {
-		tk, g = unwrapValue(g, &lt)
-		// Check its a map/struct
-		gm, ok := g.(map[string]interface{})
-		if !ok {
-			*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected gateway entry to be a map/struct, got %v", g)})
-			continue
-		}
-		gateway := &RemoteGatewayOpts{}
-		for k, v := range gm {
-			tk, v = unwrapValue(v, &lt)
-			switch strings.ToLower(k) {
-			case "name":
-				gateway.Name = v.(string)
-			case "tls":
-				tls, tlsopts, err := getTLSConfig(tk)
-				if err != nil {
-					*errors = append(*errors, err)
-					continue
-				}
-				gateway.TLSConfig = tls
-				gateway.TLSTimeout = tlsopts.Timeout
-				gateway.tlsConfigOpts = tlsopts
-			case "url":
-				url, err := parseURL(v.(string), "gateway")
-				if err != nil {
-					*errors = append(*errors, &configErr{tk, err.Error()})
-					continue
-				}
-				gateway.URLs = append(gateway.URLs, url)
-			case "urls":
-				urls, errs := parseURLs(v.([]interface{}), "gateway", warnings)
-				if errs != nil {
-					*errors = append(*errors, errs...)
-					continue
-				}
-				gateway.URLs = urls
-			default:
-				if !tk.IsUsedVariable() {
-					err := &unknownConfigFieldErr{
-						field: k,
-						configErr: configErr{
-							token: tk,
-						},
-					}
-					*errors = append(*errors, err)
-					continue
-				}
-			}
-		}
-		gateways = append(gateways, gateway)
-	}
-	return gateways, nil
 }
 
 // Temp structures to hold account import and export defintions since they need
@@ -2239,8 +1764,6 @@ func parseAccountLimits(mv interface{}, acc *Account, errors *[]error, warnings 
 			acc.msubs = int32(mv.(int64))
 		case "max_payload", "max_pay":
 			acc.mpay = int32(mv.(int64))
-		case "max_leafnodes", "max_leafs":
-			acc.mleafs = int32(mv.(int64))
 		default:
 			if !tk.IsUsedVariable() {
 				err := &configErr{tk, fmt.Sprintf("Unknown field %q parsing account limits", k)}
@@ -3652,32 +3175,6 @@ func setBaselineOptions(opts *Options) {
 			opts.Cluster.AuthTimeout = getDefaultAuthTimeout(opts.Cluster.TLSConfig, opts.Cluster.TLSTimeout)
 		}
 	}
-	if opts.LeafNode.Port != 0 {
-		if opts.LeafNode.Host == "" {
-			opts.LeafNode.Host = DEFAULT_HOST
-		}
-		if opts.LeafNode.TLSTimeout == 0 {
-			opts.LeafNode.TLSTimeout = float64(TLS_TIMEOUT) / float64(time.Second)
-		}
-		if opts.LeafNode.AuthTimeout == 0 {
-			opts.LeafNode.AuthTimeout = getDefaultAuthTimeout(opts.LeafNode.TLSConfig, opts.LeafNode.TLSTimeout)
-		}
-	}
-	// Set baseline connect port for remotes.
-	for _, r := range opts.LeafNode.Remotes {
-		if r != nil {
-			for _, u := range r.URLs {
-				if u.Port() == "" {
-					u.Host = net.JoinHostPort(u.Host, strconv.Itoa(DEFAULT_LEAFNODE_PORT))
-				}
-			}
-		}
-	}
-
-	// Set this regardless of opts.LeafNode.Port
-	if opts.LeafNode.ReconnectInterval == 0 {
-		opts.LeafNode.ReconnectInterval = DEFAULT_LEAF_NODE_RECONNECT
-	}
 
 	if opts.MaxControlLine == 0 {
 		opts.MaxControlLine = MAX_CONTROL_LINE_SIZE
@@ -3700,17 +3197,7 @@ func setBaselineOptions(opts *Options) {
 	if opts.LameDuckGracePeriod == 0 {
 		opts.LameDuckGracePeriod = DEFAULT_LAME_DUCK_GRACE_PERIOD
 	}
-	if opts.Gateway.Port != 0 {
-		if opts.Gateway.Host == "" {
-			opts.Gateway.Host = DEFAULT_HOST
-		}
-		if opts.Gateway.TLSTimeout == 0 {
-			opts.Gateway.TLSTimeout = float64(TLS_TIMEOUT) / float64(time.Second)
-		}
-		if opts.Gateway.AuthTimeout == 0 {
-			opts.Gateway.AuthTimeout = getDefaultAuthTimeout(opts.Gateway.TLSConfig, opts.Gateway.TLSTimeout)
-		}
-	}
+
 	if opts.ConnectErrorReports == 0 {
 		opts.ConnectErrorReports = DEFAULT_CONNECT_ERROR_REPORTS
 	}

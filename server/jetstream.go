@@ -413,18 +413,6 @@ const jsWillExtend = "will_extend"
 // This will check if we have a solicited leafnode that shares the system account
 // and extension is not manually disabled
 func (s *Server) canExtendOtherDomain() bool {
-	opts := s.getOpts()
-	sysAcc := s.SystemAccount().GetName()
-	for _, r := range opts.LeafNode.Remotes {
-		if r.LocalAccount == sysAcc {
-			for _, denySub := range r.DenyImports {
-				if subjectIsSubsetMatch(denySub, raftAllSubj) {
-					return false
-				}
-			}
-			return true
-		}
-	}
 	return false
 }
 
@@ -656,9 +644,7 @@ func (s *Server) configJetStream(acc *Account) error {
 			if err := acc.EnableJetStream(jsLimits); err != nil {
 				return err
 			}
-			if s.gateway.enabled {
-				s.switchAccountToInterestMode(acc.GetName())
-			}
+
 		}
 	} else if acc != s.SystemAccount() {
 		if acc.JetStreamEnabled() {

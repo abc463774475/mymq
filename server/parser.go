@@ -178,13 +178,7 @@ func (c *client) parse(buf []byte) error {
 						goto authErr
 					}
 				}
-				// If the connection is a gateway connection, make sure that
-				// if this is an inbound, it starts with a CONNECT.
-				if c.kind == GATEWAY && !c.gw.outbound && !c.gw.connected {
-					// Use auth violation since no CONNECT was sent.
-					// It could be a parseErr too.
-					goto authErr
-				}
+
 			}
 			switch b {
 			case 'P', 'p':
@@ -202,7 +196,7 @@ func (c *client) parse(buf []byte) error {
 					c.state = OP_R
 				}
 			case 'L', 'l':
-				if c.kind != LEAF && c.kind != ROUTER {
+				if c.kind != ROUTER {
 					goto parseErr
 				} else {
 					c.state = OP_L
@@ -343,16 +337,11 @@ func (c *client) parse(buf []byte) error {
 					return err
 				}
 				var err error
-				if c.kind == ROUTER || c.kind == GATEWAY {
+				if c.kind == ROUTER {
 					if trace {
 						c.traceInOp("HMSG", arg)
 					}
 					err = c.processRoutedHeaderMsgArgs(arg)
-				} else if c.kind == LEAF {
-					if trace {
-						c.traceInOp("HMSG", arg)
-					}
-					err = c.processLeafHeaderMsgArgs(arg)
 				}
 				if err != nil {
 					return err
@@ -480,7 +469,7 @@ func (c *client) parse(buf []byte) error {
 			}
 
 			// Check for mappings.
-			if (c.kind == CLIENT || c.kind == LEAF) && c.in.flags.isSet(hasMappings) {
+			if (c.kind == CLIENT) && c.in.flags.isSet(hasMappings) {
 				changed := c.selectMappedSubject()
 				if trace && changed {
 					c.traceInOp("MAPPING", []byte(fmt.Sprintf("%s -> %s", c.pa.mapped, c.pa.subject)))
@@ -653,16 +642,7 @@ func (c *client) parse(buf []byte) error {
 						}
 						err = c.processRemoteSub(arg, true)
 					}
-				case GATEWAY:
-					if trace {
-						c.traceInOp("RS+", arg)
-					}
-					err = c.processGatewayRSub(arg)
-				case LEAF:
-					if trace {
-						c.traceInOp("LS+", arg)
-					}
-					err = c.processLeafSub(arg)
+
 				}
 				if err != nil {
 					return err
@@ -785,16 +765,7 @@ func (c *client) parse(buf []byte) error {
 						}
 					}
 					err = c.processRemoteUnsub(arg)
-				case GATEWAY:
-					if trace {
-						c.traceInOp("RS-", arg)
-					}
-					err = c.processGatewayRUnsub(arg)
-				case LEAF:
-					if trace {
-						c.traceInOp("LS-", arg)
-					}
-					err = c.processLeafUnsub(arg)
+
 				}
 				if err != nil {
 					return err
@@ -978,7 +949,7 @@ func (c *client) parse(buf []byte) error {
 					return err
 				}
 				var err error
-				if c.kind == ROUTER || c.kind == GATEWAY {
+				if c.kind == ROUTER {
 					switch c.op {
 					case 'R', 'r':
 						if trace {
@@ -992,11 +963,6 @@ func (c *client) parse(buf []byte) error {
 						lmsg = true
 						err = c.processRoutedOriginClusterMsgArgs(arg)
 					}
-				} else if c.kind == LEAF {
-					if trace {
-						c.traceInOp("LMSG", arg)
-					}
-					err = c.processLeafMsgArgs(arg)
 				}
 				if err != nil {
 					return err
@@ -1247,7 +1213,7 @@ func (c *client) clonePubArg(lmsg bool) error {
 	c.argBuf = append(c.argBuf, c.pa.arg...)
 
 	switch c.kind {
-	case ROUTER, GATEWAY:
+	case ROUTER:
 		if lmsg {
 			return c.processRoutedOriginClusterMsgArgs(c.argBuf)
 		}
@@ -1255,12 +1221,6 @@ func (c *client) clonePubArg(lmsg bool) error {
 			return c.processRoutedMsgArgs(c.argBuf)
 		} else {
 			return c.processRoutedHeaderMsgArgs(c.argBuf)
-		}
-	case LEAF:
-		if c.pa.hdr < 0 {
-			return c.processLeafMsgArgs(c.argBuf)
-		} else {
-			return c.processLeafHeaderMsgArgs(c.argBuf)
 		}
 	default:
 		if c.pa.hdr < 0 {

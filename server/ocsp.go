@@ -435,7 +435,7 @@ func (srv *Server) NewOCSPMonitor(config *tlsConfigKind) (*tls.Config, *OCSPMoni
 
 		// Check whether need to verify staples from a client connection depending on the type.
 		switch kind {
-		case kindStringMap[ROUTER], kindStringMap[GATEWAY], kindStringMap[LEAF]:
+		case kindStringMap[ROUTER]:
 			tc.VerifyConnection = func(s tls.ConnectionState) error {
 				oresp := s.OCSPResponse
 				if oresp == nil {
@@ -551,68 +551,7 @@ func (s *Server) configureOCSP() []*tlsConfigKind {
 		}
 		configs = append(configs, o)
 	}
-	if config := sopts.LeafNode.TLSConfig; config != nil {
-		opts := sopts.LeafNode.tlsConfigOpts
-		o := &tlsConfigKind{
-			kind:      kindStringMap[LEAF],
-			tlsConfig: config,
-			tlsOpts:   opts,
-			apply: func(tc *tls.Config) {
 
-				// RequireAndVerifyClientCert is used to tell a client that it
-				// should send the client cert to the server.
-				tc.ClientAuth = tls.RequireAndVerifyClientCert
-				// GetClientCertificate is used by a client to send the client cert
-				// to a server. We're a server, so we must not set this.
-				tc.GetClientCertificate = nil
-				sopts.LeafNode.TLSConfig = tc
-			},
-		}
-		configs = append(configs, o)
-	}
-	for _, remote := range sopts.LeafNode.Remotes {
-		if config := remote.TLSConfig; config != nil {
-			// Use a copy of the remote here since will be used
-			// in the apply func callback below.
-			r, opts := remote, remote.tlsConfigOpts
-			o := &tlsConfigKind{
-				kind:      kindStringMap[LEAF],
-				tlsConfig: config,
-				tlsOpts:   opts,
-				apply: func(tc *tls.Config) {
-					// GetCertificate is used by a server to send the server cert to a
-					// client. We're a client, so we must not set this.
-					tc.GetCertificate = nil
-					r.TLSConfig = tc
-				},
-			}
-			configs = append(configs, o)
-		}
-	}
-	if config := sopts.Gateway.TLSConfig; config != nil {
-		opts := sopts.Gateway.tlsConfigOpts
-		o := &tlsConfigKind{
-			kind:      kindStringMap[GATEWAY],
-			tlsConfig: config,
-			tlsOpts:   opts,
-			apply:     func(tc *tls.Config) { sopts.Gateway.TLSConfig = tc },
-		}
-		configs = append(configs, o)
-	}
-	for _, remote := range sopts.Gateway.Gateways {
-		if config := remote.TLSConfig; config != nil {
-			gw, opts := remote, remote.tlsConfigOpts
-			o := &tlsConfigKind{
-				kind:      kindStringMap[GATEWAY],
-				tlsConfig: config,
-				tlsOpts:   opts,
-				apply: func(tc *tls.Config) {
-					gw.TLSConfig = tc
-				},
-			}
-			configs = append(configs, o)
-		}
-	}
 	return configs
 }
 

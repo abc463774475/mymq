@@ -50,34 +50,32 @@ var maxSubLimitReportThreshold = defaultMaxSubLimitReportThreshold
 // You can share via Exports and Imports of Streams and Services.
 type Account struct {
 	stats
-	gwReplyMapping
-	Name         string
-	Nkey         string
-	Issuer       string
-	claimJWT     string
-	updated      time.Time
-	mu           sync.RWMutex
-	sqmu         sync.Mutex
-	sl           *Sublist
-	ic           *client
-	isid         uint64
-	etmr         *time.Timer
-	ctmr         *time.Timer
-	strack       map[string]sconns
-	nrclients    int32
-	sysclients   int32
-	nleafs       int32
-	nrleafs      int32
+	Name       string
+	Nkey       string
+	Issuer     string
+	claimJWT   string
+	updated    time.Time
+	mu         sync.RWMutex
+	sqmu       sync.Mutex
+	sl         *Sublist
+	ic         *client
+	isid       uint64
+	etmr       *time.Timer
+	ctmr       *time.Timer
+	strack     map[string]sconns
+	nrclients  int32
+	sysclients int32
+
 	clients      map[*client]struct{}
 	rm           map[string]int32
 	lqws         map[string]int32
 	usersRevoked map[string]int64
 	mappings     []*mapping
-	lleafs       []*client
-	imports      importMap
-	exports      exportMap
-	js           *jsAccount
-	jsLimits     map[string]JetStreamAccountLimits
+
+	imports  importMap
+	exports  exportMap
+	js       *jsAccount
+	jsLimits map[string]JetStreamAccountLimits
 	limits
 	expired     bool
 	incomplete  bool
@@ -98,14 +96,12 @@ type limits struct {
 	mpay           int32
 	msubs          int32
 	mconns         int32
-	mleafs         int32
 	disallowBearer bool
 }
 
 // Used to track remote clients and leafnodes per remote server.
 type sconns struct {
 	conns int32
-	leafs int32
 }
 
 // Import stream mapping struct
@@ -230,7 +226,7 @@ type importMap struct {
 func NewAccount(name string) *Account {
 	a := &Account{
 		Name:     name,
-		limits:   limits{-1, -1, -1, -1, false},
+		limits:   limits{-1, -1, -1, false},
 		eventIds: nuid.New(),
 	}
 	return a
@@ -330,9 +326,8 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 	// This does not depend on receiving all updates since each one is idempotent.
 	// FIXME(dlc) - We should cleanup when these both go to zero.
 	prev := a.strack[m.Server.ID]
-	a.strack[m.Server.ID] = sconns{conns: int32(m.Conns), leafs: int32(m.LeafNodes)}
+	a.strack[m.Server.ID] = sconns{conns: int32(m.Conns)}
 	a.nrclients += int32(m.Conns) - prev.conns
-	a.nrleafs += int32(m.LeafNodes) - prev.leafs
 
 	mtce := a.mconns != jwt.NoLimit && (len(a.clients)-int(a.sysclients)+int(a.nrclients) > int(a.mconns))
 	// If we are over here some have snuck in and we need to rebalance.
@@ -349,17 +344,7 @@ func (a *Account) updateRemoteServer(m *AccountNumConns) []*client {
 			clients = clients[:over]
 		}
 	}
-	// Now check leafnodes.
-	mtlce := a.mleafs != jwt.NoLimit && (a.nleafs+a.nrleafs > a.mleafs)
-	if mtlce {
-		// Take ones from the end.
-		leafs := a.lleafs
-		over := int(a.nleafs + a.nrleafs - a.mleafs)
-		if over < len(leafs) {
-			leafs = leafs[len(leafs)-over:]
-		}
-		clients = append(clients, leafs...)
-	}
+
 	a.mu.Unlock()
 
 	// If we have exceeded our max clients this will be populated.
@@ -373,7 +358,6 @@ func (a *Account) removeRemoteServer(sid string) {
 		prev := a.strack[sid]
 		delete(a.strack, sid)
 		a.nrclients -= prev.conns
-		a.nrleafs -= prev.leafs
 	}
 	a.mu.Unlock()
 }
@@ -384,7 +368,7 @@ func (a *Account) removeRemoteServer(sid string) {
 func (a *Account) expectedRemoteResponses() (expected int32) {
 	a.mu.RLock()
 	for _, sc := range a.strack {
-		if sc.conns > 0 || sc.leafs > 0 {
+		if sc.conns > 0 {
 			expected++
 		}
 	}
@@ -428,7 +412,7 @@ func (a *Account) NumConnections() int {
 // are not on this server.
 func (a *Account) NumRemoteConnections() int {
 	a.mu.RLock()
-	nc := int(a.nrclients + a.nrleafs)
+	nc := int(a.nrclients)
 	a.mu.RUnlock()
 	return nc
 }
@@ -444,7 +428,7 @@ func (a *Account) NumLocalConnections() int {
 
 // Do not account for the system accounts.
 func (a *Account) numLocalConnections() int {
-	return len(a.clients) - int(a.sysclients) - int(a.nleafs)
+	return len(a.clients) - int(a.sysclients)
 }
 
 // This is for extended local interest.
@@ -454,10 +438,6 @@ func (a *Account) numLocalAndLeafConnections() int {
 	nlc := len(a.clients) - int(a.sysclients)
 	a.mu.RUnlock()
 	return nlc
-}
-
-func (a *Account) numLocalLeafNodes() int {
-	return int(a.nleafs)
 }
 
 // MaxTotalConnectionsReached returns if we have reached our limit for number of connections.
@@ -478,49 +458,6 @@ func (a *Account) MaxActiveConnections() int {
 	mconns := int(a.mconns)
 	a.mu.RUnlock()
 	return mconns
-}
-
-// MaxTotalLeafNodesReached returns if we have reached our limit for number of leafnodes.
-func (a *Account) MaxTotalLeafNodesReached() bool {
-	a.mu.RLock()
-	mtc := a.maxTotalLeafNodesReached()
-	a.mu.RUnlock()
-	return mtc
-}
-
-func (a *Account) maxTotalLeafNodesReached() bool {
-	if a.mleafs != jwt.NoLimit {
-		return a.nleafs+a.nrleafs >= a.mleafs
-	}
-	return false
-}
-
-// NumLeafNodes returns the active number of local and remote
-// leaf node connections.
-func (a *Account) NumLeafNodes() int {
-	a.mu.RLock()
-	nln := int(a.nleafs + a.nrleafs)
-	a.mu.RUnlock()
-	return nln
-}
-
-// NumRemoteLeafNodes returns the active number of remote
-// leaf node connections.
-func (a *Account) NumRemoteLeafNodes() int {
-	a.mu.RLock()
-	nrn := int(a.nrleafs)
-	a.mu.RUnlock()
-	return nrn
-}
-
-// MaxActiveLeafNodes return the set limit for the account system
-// wide for total number of leavenode connections.
-// NOTE: these are tracked separately.
-func (a *Account) MaxActiveLeafNodes() int {
-	a.mu.RLock()
-	mleafs := int(a.mleafs)
-	a.mu.RUnlock()
-	return mleafs
 }
 
 // RoutedSubs returns how many subjects we would send across a route when first
@@ -694,16 +631,6 @@ func (a *Account) AddWeightedMappings(src string, dests ...*MapDest) error {
 	// If we did not replace add to the end.
 	a.mappings = append(a.mappings, m)
 
-	// If we have connected leafnodes make sure to update.
-	if len(a.lleafs) > 0 {
-		leafs := append([]*client(nil), a.lleafs...)
-		// Need to release because lock ordering is client -> account
-		a.mu.Unlock()
-		for _, lc := range leafs {
-			lc.forceAddToSmap(src)
-		}
-		a.mu.Lock()
-	}
 	return nil
 }
 
@@ -883,11 +810,8 @@ func (a *Account) addClient(c *client) int {
 	}
 	added := n != len(a.clients)
 	if added {
-		if c.kind != CLIENT && c.kind != LEAF {
+		if c.kind != CLIENT {
 			a.sysclients++
-		} else if c.kind == LEAF {
-			a.nleafs++
-			a.lleafs = append(a.lleafs, c)
 		}
 	}
 	a.mu.Unlock()
@@ -899,25 +823,6 @@ func (a *Account) addClient(c *client) int {
 	return n
 }
 
-// Helper function to remove leaf nodes. If number of leafnodes gets large
-// this may need to be optimized out of linear search but believe number
-// of active leafnodes per account scope to be small and therefore cache friendly.
-// Lock should be held on account.
-func (a *Account) removeLeafNode(c *client) {
-	ll := len(a.lleafs)
-	for i, l := range a.lleafs {
-		if l == c {
-			a.lleafs[i] = a.lleafs[ll-1]
-			if ll == 1 {
-				a.lleafs = nil
-			} else {
-				a.lleafs = a.lleafs[:ll-1]
-			}
-			return
-		}
-	}
-}
-
 // removeClient keeps our accounting of local active clients updated.
 func (a *Account) removeClient(c *client) int {
 	a.mu.Lock()
@@ -925,11 +830,8 @@ func (a *Account) removeClient(c *client) int {
 	delete(a.clients, c)
 	removed := n != len(a.clients)
 	if removed {
-		if c.kind != CLIENT && c.kind != LEAF {
+		if c.kind != CLIENT {
 			a.sysclients--
-		} else if c.kind == LEAF {
-			a.nleafs--
-			a.removeLeafNode(c)
 		}
 	}
 	a.mu.Unlock()
@@ -1923,15 +1825,10 @@ func (a *Account) addServiceImportSub(si *serviceImport) error {
 	cb := func(sub *subscription, c *client, acc *Account, subject, reply string, msg []byte) {
 		c.processServiceImport(si, acc, msg)
 	}
-	sub, err := c.processSubEx([]byte(subject), nil, []byte(sid), cb, true, true, false)
+	_, err := c.processSubEx([]byte(subject), nil, []byte(sid), cb, true, true, false)
 	if err != nil {
 		return err
 	}
-	// Leafnodes introduce a new way to introduce messages into the system. Therefore forward import subscription
-	// This is similar to what initLeafNodeSmapAndSendSubs does
-	// TODO we need to consider performing this update as we get client subscriptions.
-	//      This behavior would result in subscription propagation only where actually used.
-	a.srv.updateLeafNodes(a, sub, 1)
 	return nil
 }
 
@@ -3249,7 +3146,6 @@ func (s *Server) updateAccountClaimsWithRefresh(a *Account, ac *jwt.AccountClaim
 	a.msubs = int32(ac.Limits.Subs)
 	a.mpay = int32(ac.Limits.Payload)
 	a.mconns = int32(ac.Limits.Conn)
-	a.mleafs = int32(ac.Limits.LeafNodeConn)
 	a.disallowBearer = ac.Limits.DisallowBearer
 	// Check for any revocations
 	if len(ac.Revocations) > 0 {
@@ -3729,7 +3625,6 @@ func removeCb(s *Server, pubKey string) {
 	a.msubs = 0
 	a.mpay = 0
 	a.mconns = 0
-	a.mleafs = 0
 	a.updated = time.Now().UTC()
 	a.mu.Unlock()
 	// set the account to be expired and disconnect clients

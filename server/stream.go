@@ -3277,7 +3277,7 @@ func (mset *stream) processDirectGetRequest(_ *subscription, c *client, _ *Accou
 		return
 	}
 
-	inlineOk := c.kind != ROUTER && c.kind != GATEWAY && c.kind != LEAF
+	inlineOk := c.kind != ROUTER
 	if !inlineOk {
 		// Check how long we have been away from the readloop for the route or gateway or leafnode.
 		// If too long move to a separate go routine.

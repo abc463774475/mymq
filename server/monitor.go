@@ -261,7 +261,7 @@ func (s *Server) Connz(opts *ConnzOptions) (*Connz, error) {
 		a.mu.RLock()
 		clist = make(map[uint64]*client, a.numLocalConnections())
 		for c := range a.clients {
-			if c.kind == CLIENT || c.kind == LEAF {
+			if c.kind == CLIENT {
 				clist[c.cid] = c
 			}
 		}
@@ -1121,21 +1121,21 @@ type Varz struct {
 	Gateway           GatewayOptsVarz  `json:"gateway,omitempty"`
 	LeafNode          LeafNodeOptsVarz `json:"leaf,omitempty"`
 
-	JetStream             JetStreamVarz         `json:"jetstream,omitempty"`
-	TLSTimeout            float64               `json:"tls_timeout"`
-	WriteDeadline         time.Duration         `json:"write_deadline"`
-	Start                 time.Time             `json:"start"`
-	Now                   time.Time             `json:"now"`
-	Uptime                string                `json:"uptime"`
-	Mem                   int64                 `json:"mem"`
-	Cores                 int                   `json:"cores"`
-	MaxProcs              int                   `json:"gomaxprocs"`
-	CPU                   float64               `json:"cpu"`
-	Connections           int                   `json:"connections"`
-	TotalConnections      uint64                `json:"total_connections"`
-	Routes                int                   `json:"routes"`
-	Remotes               int                   `json:"remotes"`
-	Leafs                 int                   `json:"leafnodes"`
+	JetStream        JetStreamVarz `json:"jetstream,omitempty"`
+	TLSTimeout       float64       `json:"tls_timeout"`
+	WriteDeadline    time.Duration `json:"write_deadline"`
+	Start            time.Time     `json:"start"`
+	Now              time.Time     `json:"now"`
+	Uptime           string        `json:"uptime"`
+	Mem              int64         `json:"mem"`
+	Cores            int           `json:"cores"`
+	MaxProcs         int           `json:"gomaxprocs"`
+	CPU              float64       `json:"cpu"`
+	Connections      int           `json:"connections"`
+	TotalConnections uint64        `json:"total_connections"`
+	Routes           int           `json:"routes"`
+	Remotes          int           `json:"remotes"`
+
 	InMsgs                int64                 `json:"in_msgs"`
 	OutMsgs               int64                 `json:"out_msgs"`
 	InBytes               int64                 `json:"in_bytes"`
@@ -1304,8 +1304,6 @@ func (s *Server) HandleRoot(w http.ResponseWriter, r *http.Request) {
 		s.basePath(AccountzPath),
 		s.basePath(SubszPath),
 		s.basePath(RoutezPath),
-		s.basePath(LeafzPath),
-		s.basePath(GatewayzPath),
 		s.basePath(HealthzPath),
 	)
 }
@@ -1358,12 +1356,9 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	info := s.info
 	opts := s.getOpts()
 	c := &opts.Cluster
-	gw := &opts.Gateway
-	ln := &opts.LeafNode
+
 	clustTlsReq := c.TLSConfig != nil
-	gatewayTlsReq := gw.TLSConfig != nil
-	leafTlsReq := ln.TLSConfig != nil
-	leafTlsVerify := leafTlsReq && ln.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
+
 	varz := &Varz{
 		ID:           info.ID,
 		Version:      info.Version,
@@ -1387,28 +1382,6 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 			TLSRequired: clustTlsReq,
 			TLSVerify:   clustTlsReq,
 		},
-		Gateway: GatewayOptsVarz{
-			Name:           gw.Name,
-			Host:           gw.Host,
-			Port:           gw.Port,
-			AuthTimeout:    gw.AuthTimeout,
-			TLSTimeout:     gw.TLSTimeout,
-			TLSRequired:    gatewayTlsReq,
-			TLSVerify:      gatewayTlsReq,
-			Advertise:      gw.Advertise,
-			ConnectRetries: gw.ConnectRetries,
-			Gateways:       []RemoteGatewayOptsVarz{},
-			RejectUnknown:  gw.RejectUnknown,
-		},
-		LeafNode: LeafNodeOptsVarz{
-			Host:        ln.Host,
-			Port:        ln.Port,
-			AuthTimeout: ln.AuthTimeout,
-			TLSTimeout:  ln.TLSTimeout,
-			TLSRequired: leafTlsReq,
-			TLSVerify:   leafTlsVerify,
-			Remotes:     []RemoteLeafOptsVarz{},
-		},
 
 		Start:                 s.start,
 		MaxSubs:               opts.MaxSubs,
@@ -1420,35 +1393,6 @@ func (s *Server) createVarz(pcpu float64, rss int64) *Varz {
 	}
 	if len(opts.Routes) > 0 {
 		varz.Cluster.URLs = urlsToStrings(opts.Routes)
-	}
-	if l := len(gw.Gateways); l > 0 {
-		rgwa := make([]RemoteGatewayOptsVarz, l)
-		for i, r := range gw.Gateways {
-			rgwa[i] = RemoteGatewayOptsVarz{
-				Name:       r.Name,
-				TLSTimeout: r.TLSTimeout,
-			}
-		}
-		varz.Gateway.Gateways = rgwa
-	}
-	if l := len(ln.Remotes); l > 0 {
-		rlna := make([]RemoteLeafOptsVarz, l)
-		for i, r := range ln.Remotes {
-			var deny *DenyRules
-			if len(r.DenyImports) > 0 || len(r.DenyExports) > 0 {
-				deny = &DenyRules{
-					Imports: r.DenyImports,
-					Exports: r.DenyExports,
-				}
-			}
-			rlna[i] = RemoteLeafOptsVarz{
-				LocalAccount: r.LocalAccount,
-				URLs:         urlsToStrings(r.URLs),
-				TLSTimeout:   r.TLSTimeout,
-				Deny:         deny,
-			}
-		}
-		varz.LeafNode.Remotes = rlna
 	}
 
 	// Finish setting it up with fields that can be updated during
@@ -1528,7 +1472,7 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 	v.TotalConnections = s.totalClients
 	v.Routes = len(s.routes)
 	v.Remotes = len(s.remotes)
-	v.Leafs = len(s.leafs)
+
 	v.InMsgs = atomic.LoadInt64(&s.inMsgs)
 	v.InBytes = atomic.LoadInt64(&s.inBytes)
 	v.OutMsgs = atomic.LoadInt64(&s.outMsgs)
@@ -1549,44 +1493,6 @@ func (s *Server) updateVarzRuntimeFields(v *Varz, forceUpdate bool, pcpu float64
 		v.HTTPReqStats[key] = val
 	}
 
-	// Update Gateway remote urls if applicable
-	gw := s.gateway
-	gw.RLock()
-	if gw.enabled {
-		for i := 0; i < len(v.Gateway.Gateways); i++ {
-			g := &v.Gateway.Gateways[i]
-			rgw := gw.remotes[g.Name]
-			if rgw != nil {
-				rgw.RLock()
-				// forceUpdate is needed if user calls Varz() programmatically,
-				// since we need to create a new instance every time and the
-				// gateway's varzUpdateURLs may have been set to false after
-				// a web /varz inspection.
-				if forceUpdate || rgw.varzUpdateURLs {
-					// Make reuse of backend array
-					g.URLs = g.URLs[:0]
-					// rgw.urls is a map[string]*url.URL where the key is
-					// already in the right format (host:port, without any
-					// user info present).
-					for u := range rgw.urls {
-						g.URLs = append(g.URLs, u)
-					}
-					rgw.varzUpdateURLs = false
-				}
-				rgw.RUnlock()
-			} else if g.Name == gw.name && len(gw.ownCfgURLs) > 0 {
-				// This is a remote that correspond to this very same server.
-				// We report the URLs that were configured (if any).
-				// Since we don't support changes to the gateway configuration
-				// at this time, we could do this only if g.URLs has not been already
-				// set, but let's do it regardless in case we add support for
-				// gateway config reload.
-				g.URLs = g.URLs[:0]
-				g.URLs = append(g.URLs, gw.ownCfgURLs...)
-			}
-		}
-	}
-	gw.RUnlock()
 }
 
 // HandleVarz will process HTTP requests for server information.
@@ -1687,38 +1593,6 @@ type AccountGatewayz struct {
 	NumQueueSubscriptions int    `json:"num_queue_subs,omitempty"`
 }
 
-// Gatewayz returns a Gatewayz struct containing information about gateways.
-func (s *Server) Gatewayz(opts *GatewayzOptions) (*Gatewayz, error) {
-	srvID := s.ID()
-	now := time.Now().UTC()
-	gw := s.gateway
-	gw.RLock()
-	if !gw.enabled {
-		gw.RUnlock()
-		gwz := &Gatewayz{
-			ID:               srvID,
-			Now:              now,
-			OutboundGateways: map[string]*RemoteGatewayz{},
-			InboundGateways:  map[string][]*RemoteGatewayz{},
-		}
-		return gwz, nil
-	}
-	// Here gateways are enabled, so fill up more.
-	gwz := &Gatewayz{
-		ID:   srvID,
-		Now:  now,
-		Name: gw.name,
-		Host: gw.info.Host,
-		Port: gw.info.Port,
-	}
-	gw.RUnlock()
-
-	gwz.OutboundGateways = s.createOutboundsRemoteGatewayz(opts, now)
-	gwz.InboundGateways = s.createInboundsRemoteGatewayz(opts, now)
-
-	return gwz, nil
-}
-
 // Based on give options struct, returns if there is a filtered
 // Gateway Name and if we should do report Accounts.
 // Note that if Accounts is false but AccountName is not empty,
@@ -1736,335 +1610,6 @@ func getMonitorGWOptions(opts *GatewayzOptions) (string, bool) {
 		}
 	}
 	return name, accs
-}
-
-// Returns a map of gateways outbound connections.
-// Based on options, will include a single or all gateways,
-// with no/single/or all accounts interest information.
-func (s *Server) createOutboundsRemoteGatewayz(opts *GatewayzOptions, now time.Time) map[string]*RemoteGatewayz {
-	targetGWName, doAccs := getMonitorGWOptions(opts)
-
-	if targetGWName != _EMPTY_ {
-		c := s.getOutboundGatewayConnection(targetGWName)
-		if c == nil {
-			return nil
-		}
-		outbounds := make(map[string]*RemoteGatewayz, 1)
-		_, rgw := createOutboundRemoteGatewayz(c, opts, now, doAccs)
-		outbounds[targetGWName] = rgw
-		return outbounds
-	}
-
-	var connsa [16]*client
-	var conns = connsa[:0]
-
-	s.getOutboundGatewayConnections(&conns)
-
-	outbounds := make(map[string]*RemoteGatewayz, len(conns))
-	for _, c := range conns {
-		name, rgw := createOutboundRemoteGatewayz(c, opts, now, doAccs)
-		if rgw != nil {
-			outbounds[name] = rgw
-		}
-	}
-	return outbounds
-}
-
-// Returns a RemoteGatewayz for a given outbound gw connection
-func createOutboundRemoteGatewayz(c *client, opts *GatewayzOptions, now time.Time, doAccs bool) (string, *RemoteGatewayz) {
-	var name string
-	var rgw *RemoteGatewayz
-
-	c.mu.Lock()
-	if c.gw != nil {
-		rgw = &RemoteGatewayz{}
-		if doAccs {
-			rgw.Accounts = createOutboundAccountsGatewayz(opts, c.gw)
-		}
-		if c.gw.cfg != nil {
-			rgw.IsConfigured = !c.gw.cfg.isImplicit()
-		}
-		rgw.Connection = &ConnInfo{}
-		rgw.Connection.fill(c, c.nc, now)
-		name = c.gw.name
-	}
-	c.mu.Unlock()
-
-	return name, rgw
-}
-
-// Returns the list of accounts for this outbound gateway connection.
-// Based on the options, it will be a single or all accounts for
-// this outbound.
-func createOutboundAccountsGatewayz(opts *GatewayzOptions, gw *gateway) []*AccountGatewayz {
-	if gw.outsim == nil {
-		return nil
-	}
-
-	var accName string
-	if opts != nil {
-		accName = opts.AccountName
-	}
-	if accName != _EMPTY_ {
-		ei, ok := gw.outsim.Load(accName)
-		if !ok {
-			return nil
-		}
-		a := createAccountOutboundGatewayz(accName, ei)
-		return []*AccountGatewayz{a}
-	}
-
-	accs := make([]*AccountGatewayz, 0, 4)
-	gw.outsim.Range(func(k, v interface{}) bool {
-		name := k.(string)
-		a := createAccountOutboundGatewayz(name, v)
-		accs = append(accs, a)
-		return true
-	})
-	return accs
-}
-
-// Returns an AccountGatewayz for this gateway outbound connection
-func createAccountOutboundGatewayz(name string, ei interface{}) *AccountGatewayz {
-	a := &AccountGatewayz{
-		Name:                  name,
-		InterestOnlyThreshold: gatewayMaxRUnsubBeforeSwitch,
-	}
-	if ei != nil {
-		e := ei.(*outsie)
-		e.RLock()
-		a.InterestMode = e.mode.String()
-		a.NoInterestCount = len(e.ni)
-		a.NumQueueSubscriptions = e.qsubs
-		a.TotalSubscriptions = int(e.sl.Count())
-		e.RUnlock()
-	} else {
-		a.InterestMode = Optimistic.String()
-	}
-	return a
-}
-
-// Returns a map of gateways inbound connections.
-// Each entry is an array of RemoteGatewayz since a given server
-// may have more than one inbound from the same remote gateway.
-// Based on options, will include a single or all gateways,
-// with no/single/or all accounts interest information.
-func (s *Server) createInboundsRemoteGatewayz(opts *GatewayzOptions, now time.Time) map[string][]*RemoteGatewayz {
-	targetGWName, doAccs := getMonitorGWOptions(opts)
-
-	var connsa [16]*client
-	var conns = connsa[:0]
-	s.getInboundGatewayConnections(&conns)
-
-	m := make(map[string][]*RemoteGatewayz)
-	for _, c := range conns {
-		c.mu.Lock()
-		if c.gw != nil && (targetGWName == _EMPTY_ || targetGWName == c.gw.name) {
-			igws := m[c.gw.name]
-			if igws == nil {
-				igws = make([]*RemoteGatewayz, 0, 2)
-			}
-			rgw := &RemoteGatewayz{}
-			if doAccs {
-				rgw.Accounts = createInboundAccountsGatewayz(opts, c.gw)
-			}
-			rgw.Connection = &ConnInfo{}
-			rgw.Connection.fill(c, c.nc, now)
-			igws = append(igws, rgw)
-			m[c.gw.name] = igws
-		}
-		c.mu.Unlock()
-	}
-	return m
-}
-
-// Returns the list of accounts for this inbound gateway connection.
-// Based on the options, it will be a single or all accounts for
-// this inbound.
-func createInboundAccountsGatewayz(opts *GatewayzOptions, gw *gateway) []*AccountGatewayz {
-	if gw.insim == nil {
-		return nil
-	}
-
-	var accName string
-	if opts != nil {
-		accName = opts.AccountName
-	}
-	if accName != _EMPTY_ {
-		e, ok := gw.insim[accName]
-		if !ok {
-			return nil
-		}
-		a := createInboundAccountGatewayz(accName, e)
-		return []*AccountGatewayz{a}
-	}
-
-	accs := make([]*AccountGatewayz, 0, 4)
-	for name, e := range gw.insim {
-		a := createInboundAccountGatewayz(name, e)
-		accs = append(accs, a)
-	}
-	return accs
-}
-
-// Returns an AccountGatewayz for this gateway inbound connection
-func createInboundAccountGatewayz(name string, e *insie) *AccountGatewayz {
-	a := &AccountGatewayz{
-		Name:                  name,
-		InterestOnlyThreshold: gatewayMaxRUnsubBeforeSwitch,
-	}
-	if e != nil {
-		a.InterestMode = e.mode.String()
-		a.NoInterestCount = len(e.ni)
-	} else {
-		a.InterestMode = Optimistic.String()
-	}
-	return a
-}
-
-// HandleGatewayz process HTTP requests for route information.
-func (s *Server) HandleGatewayz(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	s.httpReqStats[GatewayzPath]++
-	s.mu.Unlock()
-
-	accs, err := decodeBool(w, r, "accs")
-	if err != nil {
-		return
-	}
-	gwName := r.URL.Query().Get("gw_name")
-	accName := r.URL.Query().Get("acc_name")
-	if accName != _EMPTY_ {
-		accs = true
-	}
-
-	opts := &GatewayzOptions{
-		Name:        gwName,
-		Accounts:    accs,
-		AccountName: accName,
-	}
-	gw, err := s.Gatewayz(opts)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
-		return
-	}
-	b, err := json.MarshalIndent(gw, "", "  ")
-	if err != nil {
-		s.Errorf("Error marshaling response to /gatewayz request: %v", err)
-	}
-
-	// Handle response
-	ResponseHandler(w, r, b)
-}
-
-// Leafz represents detailed information on Leafnodes.
-type Leafz struct {
-	ID       string      `json:"server_id"`
-	Now      time.Time   `json:"now"`
-	NumLeafs int         `json:"leafnodes"`
-	Leafs    []*LeafInfo `json:"leafs"`
-}
-
-// LeafzOptions are options passed to Leafz
-type LeafzOptions struct {
-	// Subscriptions indicates that Leafz will return a leafnode's subscriptions
-	Subscriptions bool   `json:"subscriptions"`
-	Account       string `json:"account"`
-}
-
-// LeafInfo has detailed information on each remote leafnode connection.
-type LeafInfo struct {
-	Account  string   `json:"account"`
-	IP       string   `json:"ip"`
-	Port     int      `json:"port"`
-	RTT      string   `json:"rtt,omitempty"`
-	InMsgs   int64    `json:"in_msgs"`
-	OutMsgs  int64    `json:"out_msgs"`
-	InBytes  int64    `json:"in_bytes"`
-	OutBytes int64    `json:"out_bytes"`
-	NumSubs  uint32   `json:"subscriptions"`
-	Subs     []string `json:"subscriptions_list,omitempty"`
-}
-
-// Leafz returns a Leafz structure containing information about leafnodes.
-func (s *Server) Leafz(opts *LeafzOptions) (*Leafz, error) {
-	// Grab leafnodes
-	var lconns []*client
-	s.mu.Lock()
-	if len(s.leafs) > 0 {
-		lconns = make([]*client, 0, len(s.leafs))
-		for _, ln := range s.leafs {
-			if opts != nil && opts.Account != "" {
-				ln.mu.Lock()
-				ok := ln.acc.Name == opts.Account
-				ln.mu.Unlock()
-				if !ok {
-					continue
-				}
-			}
-			lconns = append(lconns, ln)
-		}
-	}
-	s.mu.Unlock()
-
-	var leafnodes []*LeafInfo
-	if len(lconns) > 0 {
-		leafnodes = make([]*LeafInfo, 0, len(lconns))
-		for _, ln := range lconns {
-			ln.mu.Lock()
-			lni := &LeafInfo{
-				Account:  ln.acc.Name,
-				IP:       ln.host,
-				Port:     int(ln.port),
-				RTT:      ln.getRTT().String(),
-				InMsgs:   atomic.LoadInt64(&ln.inMsgs),
-				OutMsgs:  ln.outMsgs,
-				InBytes:  atomic.LoadInt64(&ln.inBytes),
-				OutBytes: ln.outBytes,
-				NumSubs:  uint32(len(ln.subs)),
-			}
-			if opts != nil && opts.Subscriptions {
-				lni.Subs = make([]string, 0, len(ln.subs))
-				for _, sub := range ln.subs {
-					lni.Subs = append(lni.Subs, string(sub.subject))
-				}
-			}
-			ln.mu.Unlock()
-			leafnodes = append(leafnodes, lni)
-		}
-	}
-	return &Leafz{
-		ID:       s.ID(),
-		Now:      time.Now().UTC(),
-		NumLeafs: len(leafnodes),
-		Leafs:    leafnodes,
-	}, nil
-}
-
-// HandleLeafz process HTTP requests for leafnode information.
-func (s *Server) HandleLeafz(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	s.httpReqStats[LeafzPath]++
-	s.mu.Unlock()
-
-	subs, err := decodeBool(w, r, "subs")
-	if err != nil {
-		return
-	}
-	l, err := s.Leafz(&LeafzOptions{subs, r.URL.Query().Get("acc")})
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
-		return
-	}
-	b, err := json.MarshalIndent(l, "", "  ")
-	if err != nil {
-		s.Errorf("Error marshaling response to /leafz request: %v", err)
-	}
-
-	// Handle response
-	ResponseHandler(w, r, b)
 }
 
 // ResponseHandler handles responses for monitoring routes
@@ -2199,13 +1744,13 @@ type ExtVrIssues struct {
 type ExtMap map[string][]*MapDest
 
 type AccountInfo struct {
-	AccountName string               `json:"account_name"`
-	LastUpdate  time.Time            `json:"update_time,omitempty"`
-	IsSystem    bool                 `json:"is_system,omitempty"`
-	Expired     bool                 `json:"expired"`
-	Complete    bool                 `json:"complete"`
-	JetStream   bool                 `json:"jetstream_enabled"`
-	LeafCnt     int                  `json:"leafnode_connections"`
+	AccountName string    `json:"account_name"`
+	LastUpdate  time.Time `json:"update_time,omitempty"`
+	IsSystem    bool      `json:"is_system,omitempty"`
+	Expired     bool      `json:"expired"`
+	Complete    bool      `json:"complete"`
+	JetStream   bool      `json:"jetstream_enabled"`
+
 	ClientCnt   int                  `json:"client_connections"`
 	SubCnt      uint32               `json:"subscriptions"`
 	Mappings    ExtMap               `json:"mappings,omitempty"`
@@ -2417,7 +1962,6 @@ func (s *Server) accountInfo(accName string) (*AccountInfo, error) {
 		a.expired,
 		!a.incomplete,
 		a.js != nil,
-		a.numLocalLeafNodes(),
 		a.numLocalConnections(),
 		a.sl.Count(),
 		mappings,

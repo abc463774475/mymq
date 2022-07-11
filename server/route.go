@@ -78,11 +78,10 @@ type route struct {
 	jetstream    bool
 	connectURLs  []string
 
-	replySubs   map[*subscription]*time.Timer
-	gatewayURL  string
-	leafnodeURL string
-	hash        string
-	idHash      string
+	replySubs map[*subscription]*time.Timer
+
+	hash   string
+	idHash string
 }
 
 type connectInfo struct {
@@ -146,18 +145,15 @@ func (c *client) removeReplySubTimeout(sub *subscription) {
 }
 
 func (c *client) processAccountSub(arg []byte) error {
-	accName := string(arg)
-	if c.kind == GATEWAY {
-		return c.processGatewayAccountSub(accName)
-	}
+	//accName := string(arg)
 	return nil
 }
 
 func (c *client) processAccountUnsub(arg []byte) {
-	accName := string(arg)
-	if c.kind == GATEWAY {
-		c.processGatewayAccountUnsub(accName)
-	}
+	//accName := string(arg)
+	//if c.kind == GATEWAY {
+	//	c.processGatewayAccountUnsub(accName)
+	//}
 }
 
 // Process an inbound LMSG specification from the remote route. This means
@@ -425,12 +421,6 @@ func (c *client) processInboundRoutedMsg(msg []byte) {
 		return
 	}
 
-	// If the subject (c.pa.subject) has the gateway prefix, this function will handle it.
-	if c.handleGatewayReply(msg) {
-		// We are done here.
-		return
-	}
-
 	acc, r := c.getAccAndResultFromCache()
 	if acc == nil {
 		c.Debugf("Unknown account %q for routed message on subject: %q", c.pa.account, c.pa.subject)
@@ -528,20 +518,6 @@ func (c *client) processRouteInfo(info *Info) {
 	if c.flags.isSet(infoReceived) {
 		remoteID := c.route.remoteID
 
-		// Check if this is an INFO for gateways...
-		if info.Gateway != "" {
-			c.mu.Unlock()
-			// If this server has no gateway configured, report error and return.
-			if !s.gateway.enabled {
-				// FIXME: Should this be a Fatalf()?
-				s.Errorf("Received information about gateway %q from %s, but gateway is not configured",
-					info.Gateway, remoteID)
-				return
-			}
-			s.processGatewayInfoFromRoute(info, remoteID, c)
-			return
-		}
-
 		// We receive an INFO from a server that informs us about another server,
 		// so the info.ID in the INFO protocol does not match the ID of this route.
 		if remoteID != "" && remoteID != info.ID {
@@ -594,21 +570,12 @@ func (c *client) processRouteInfo(info *Info) {
 	c.route.remoteID = info.ID
 	c.route.authRequired = info.AuthRequired
 	c.route.tlsRequired = info.TLSRequired
-	c.route.gatewayURL = info.GatewayURL
 	c.route.remoteName = info.Name
 	c.route.lnoc = info.LNOC
 	c.route.jetstream = info.JetStream
 
-	// When sent through route INFO, if the field is set, it should be of size 1.
-	if len(info.LeafNodeURLs) == 1 {
-		c.route.leafnodeURL = info.LeafNodeURLs[0]
-	}
 	// Compute the hash of this route based on remote server name
 	c.route.hash = string(getHash(info.Name))
-	// Same with remote server ID (used for GW mapped replies routing).
-	// Use getGWHash since we don't use the same hash len for that
-	// for backward compatibility.
-	c.route.idHash = string(getGWHash(info.ID))
 
 	// If we do not know this route's URL, construct one on the fly
 	// from the information provided.
@@ -634,9 +601,6 @@ func (c *client) processRouteInfo(info *Info) {
 
 		// Send our subs to the other side.
 		s.sendSubsToRoute(c)
-
-		// Send info about the known gateways to this route.
-		s.sendGatewayConfigsToRoute(c)
 
 		// sendInfo will be false if the route that we just accepted
 		// is the only route there is.
@@ -669,9 +633,6 @@ func (c *client) processRouteInfo(info *Info) {
 		// to all LN connections. (Note that when coming from a route, LeafNodeURLs
 		// is an array of size 1 max).
 		s.mu.Lock()
-		if len(info.LeafNodeURLs) == 1 && s.addLeafNodeURL(info.LeafNodeURLs[0]) {
-			s.sendAsyncLeafNodeInfo()
-		}
 		s.mu.Unlock()
 	} else {
 		c.Debugf("Detected duplicate remote route %q", info.ID)
@@ -832,10 +793,6 @@ func (c *client) removeRemoteSubs() {
 		} else {
 			ase.subs = append(ase.subs, sub)
 		}
-		if srv.gateway.enabled {
-			srv.gatewayUpdateSubInterest(accountName, sub, -1)
-		}
-		srv.updateLeafNodes(ase.acc, sub, -1)
 	}
 
 	// Now remove the subs by batch for each account sublist.
@@ -887,7 +844,6 @@ func (c *client) processRemoteUnsub(arg []byte) (err error) {
 		return nil
 	}
 
-	updateGWs := false
 	// We store local subs by account and subject and optionally queue name.
 	// RS- will have the arg exactly as the key.
 	key := string(arg)
@@ -896,16 +852,8 @@ func (c *client) processRemoteUnsub(arg []byte) (err error) {
 		delete(c.subs, key)
 		acc.sl.Remove(sub)
 		c.removeReplySubTimeout(sub)
-		updateGWs = srv.gateway.enabled
 	}
 	c.mu.Unlock()
-
-	if updateGWs {
-		srv.gatewayUpdateSubInterest(accountName, sub, -1)
-	}
-
-	// Now check on leafnode updates.
-	srv.updateLeafNodes(acc, sub, -1)
 
 	if c.opts.Verbose {
 		c.sendOK()
@@ -1016,8 +964,7 @@ func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 	key := string(sub.sid)
 
 	osub := c.subs[key]
-	updateGWs := false
-	delta := int32(1)
+
 	if osub == nil {
 		c.subs[key] = sub
 		// Now place into the account sl.
@@ -1028,21 +975,12 @@ func (c *client) processRemoteSub(argo []byte, hasOrigin bool) (err error) {
 			c.sendErr("Invalid Subscription")
 			return nil
 		}
-		updateGWs = srv.gateway.enabled
 	} else if sub.queue != nil {
 		// For a queue we need to update the weight.
-		delta = sub.qw - atomic.LoadInt32(&osub.qw)
 		atomic.StoreInt32(&osub.qw, sub.qw)
 		acc.sl.UpdateRemoteQSub(osub)
 	}
 	c.mu.Unlock()
-
-	if updateGWs {
-		srv.gatewayUpdateSubInterest(acc.Name, sub, delta)
-	}
-
-	// Now check on leafnode updates.
-	srv.updateLeafNodes(acc, sub, delta)
 
 	if c.opts.Verbose {
 		c.sendOK()
@@ -1368,10 +1306,6 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 		// we don't need to send if the only route is the one we just accepted.
 		sendInfo = len(s.routes) > 1
 
-		// If the INFO contains a Gateway URL, add it to the list for our cluster.
-		if info.GatewayURL != "" && s.addGatewayURL(info.GatewayURL) {
-			s.sendAsyncGatewayInfo()
-		}
 	}
 	s.mu.Unlock()
 
@@ -1385,11 +1319,7 @@ func (s *Server) addRoute(c *client, info *Info) (bool, bool) {
 			rs := *c.route
 			r = &rs
 		}
-		// Since this duplicate route is going to be removed, make sure we clear
-		// c.route.leafnodeURL, otherwise, when processing the disconnect, this
-		// would cause the leafnode URL for that remote server to be removed
-		// from our list. Same for gateway...
-		c.route.leafnodeURL, c.route.gatewayURL = _EMPTY_, _EMPTY_
+
 		// Same for the route hash otherwise it would be removed from s.routesByHash.
 		c.route.hash, c.route.idHash = _EMPTY_, _EMPTY_
 		c.mu.Unlock()
@@ -1417,6 +1347,23 @@ func (c *client) importFilter(sub *subscription) bool {
 	return c.canImport(string(sub.subject))
 }
 
+// Helper function to build the key.
+func keyFromSub(sub *subscription) string {
+	var _rkey [1024]byte
+	var key []byte
+
+	if sub.queue != nil {
+		// Just make the key subject spc group, e.g. 'foo bar'
+		key = _rkey[:0]
+		key = append(key, sub.subject...)
+		key = append(key, byte(' '))
+		key = append(key, sub.queue...)
+	} else {
+		key = sub.subject
+	}
+	return string(key)
+}
+
 // updateRouteSubscriptionMap will make sure to update the route map for the subscription. Will
 // also forward to all routes if needed.
 func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, delta int32) {
@@ -1425,7 +1372,7 @@ func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, del
 	}
 
 	// We only store state on local subs for transmission across all other routes.
-	if sub.client == nil || sub.client.kind == ROUTER || sub.client.kind == GATEWAY {
+	if sub.client == nil || sub.client.kind == ROUTER {
 		return
 	}
 
@@ -1617,7 +1564,6 @@ func (s *Server) startRouteAcceptLoop() {
 		MaxPayload:   s.info.MaxPayload,
 		JetStream:    s.info.JetStream,
 		Proto:        proto,
-		GatewayURL:   s.getGatewayURL(),
 		Headers:      s.supportsHeaders(),
 		Cluster:      s.info.Cluster,
 		Domain:       s.info.Domain,
@@ -1637,14 +1583,7 @@ func (s *Server) startRouteAcceptLoop() {
 	if opts.Cluster.Username != "" {
 		info.AuthRequired = true
 	}
-	// If this server has a LeafNode accept loop, s.leafNodeInfo.IP is,
-	// at this point, set to the host:port for the leafnode accept URL,
-	// taking into account possible advertise setting. Use the LeafNodeURLs
-	// and set this server's leafnode accept URL. This will be sent to
-	// routed servers.
-	if !opts.LeafNode.NoAdvertise && s.leafNodeInfo.IP != _EMPTY_ {
-		info.LeafNodeURLs = []string{s.leafNodeInfo.IP}
-	}
+
 	s.routeInfo = info
 	// Possibly override Host/Port and set IP based on Cluster.Advertise
 	if err := s.setRouteInfoHostPortAndIP(); err != nil {
@@ -1903,10 +1842,13 @@ func (s *Server) removeAllRoutesExcept(c *client) {
 	}
 }
 
+// Remove the route with the given keys from the map.
+func (s *Server) removeRouteByHash(srvNameHash, srvIDHash string) {
+	s.routesByHash.Delete(srvNameHash)
+}
+
 func (s *Server) removeRoute(c *client) {
 	var rID string
-	var lnURL string
-	var gwURL string
 	var hash string
 	var idHash string
 	c.mu.Lock()
@@ -1914,10 +1856,8 @@ func (s *Server) removeRoute(c *client) {
 	r := c.route
 	if r != nil {
 		rID = r.remoteID
-		lnURL = r.leafnodeURL
 		hash = r.hash
 		idHash = r.idHash
-		gwURL = r.gatewayURL
 	}
 	c.mu.Unlock()
 	s.mu.Lock()
@@ -1928,16 +1868,7 @@ func (s *Server) removeRoute(c *client) {
 		if ok && c == rc {
 			delete(s.remotes, rID)
 		}
-		// Remove the remote's gateway URL from our list and
-		// send update to inbound Gateway connections.
-		if gwURL != _EMPTY_ && s.removeGatewayURL(gwURL) {
-			s.sendAsyncGatewayInfo()
-		}
-		// Remove the remote's leafNode URL from
-		// our list and send update to LN connections.
-		if lnURL != _EMPTY_ && s.removeLeafNodeURL(lnURL) {
-			s.sendAsyncLeafNodeInfo()
-		}
+
 		s.removeRouteByHash(hash, idHash)
 	}
 	s.removeFromTempClients(cid)

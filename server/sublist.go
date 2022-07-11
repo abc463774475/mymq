@@ -1400,7 +1400,7 @@ func addLocalSub(sub *subscription, subs *[]*subscription, includeLeafHubs bool)
 	if sub != nil && sub.client != nil {
 		kind := sub.client.kind
 		if kind == CLIENT || kind == SYSTEM || kind == JETSTREAM || kind == ACCOUNT ||
-			(includeLeafHubs && sub.client.isHubLeafNode() /* implied kind==LEAF */) {
+			(includeLeafHubs) {
 			*subs = append(*subs, sub)
 		}
 	}

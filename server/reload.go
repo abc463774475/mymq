@@ -672,19 +672,11 @@ func (s *Server) recheckPinnedCerts(curOpts *Options, newOpts *Options) {
 			}
 		}
 	}
-	if !reflect.DeepEqual(newOpts.LeafNode.TLSPinnedCerts, curOpts.LeafNode.TLSPinnedCerts) {
-		checkClients(LEAF, s.leafs, newOpts.LeafNode.TLSPinnedCerts)
-	}
+
 	if !reflect.DeepEqual(newOpts.Cluster.TLSPinnedCerts, curOpts.Cluster.TLSPinnedCerts) {
 		checkClients(ROUTER, s.routes, newOpts.Cluster.TLSPinnedCerts)
 	}
-	if reflect.DeepEqual(newOpts.Gateway.TLSPinnedCerts, curOpts.Gateway.TLSPinnedCerts) {
-		for _, c := range s.remotes {
-			if !c.matchesPinnedCert(newOpts.Gateway.TLSPinnedCerts) {
-				disconnectClients = append(disconnectClients, c)
-			}
-		}
-	}
+
 	s.mu.Unlock()
 	if len(disconnectClients) > 0 {
 		s.Noticef("Disconnect %d clients due to pinned certs reload", len(disconnectClients))
@@ -735,8 +727,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 
 	clientOrgPort := curOpts.Port
 	clusterOrgPort := curOpts.Cluster.Port
-	gatewayOrgPort := curOpts.Gateway.Port
-	leafnodesOrgPort := curOpts.LeafNode.Port
 
 	s.mu.Unlock()
 
@@ -759,12 +749,6 @@ func (s *Server) ReloadOptions(newOpts *Options) error {
 	// We don't do that for cluster, so check against -1.
 	if newOpts.Cluster.Port == -1 {
 		newOpts.Cluster.Port = clusterOrgPort
-	}
-	if newOpts.Gateway.Port == -1 {
-		newOpts.Gateway.Port = gatewayOrgPort
-	}
-	if newOpts.LeafNode.Port == -1 {
-		newOpts.LeafNode.Port = leafnodesOrgPort
 	}
 
 	if err := s.reloadOptions(curOpts, newOpts); err != nil {
@@ -1345,17 +1329,6 @@ func (s *Server) applyOptions(ctx *reloadContext, opts []option) {
 		s.sendStatszUpdate()
 	}
 
-	// For remote gateways and leafnodes, make sure that their TLS configuration
-	// is updated (since the config is "captured" early and changes would otherwise
-	// not be visible).
-	newOpts := s.getOpts()
-	if s.gateway.enabled {
-		s.gateway.updateRemotesTLSConfig(newOpts)
-	}
-	if len(newOpts.LeafNode.Remotes) > 0 {
-		s.updateRemoteLeafNodesTLSConfig(newOpts)
-	}
-
 	if reloadTLS {
 		// Restart OCSP monitoring.
 		if err := s.reloadOCSP(); err != nil {
@@ -1393,12 +1366,8 @@ func (s *Server) reloadClientTraceLevel() {
 	// Update their trace level when not holding server or gateway lock
 
 	s.mu.Lock()
-	clientCnt := 1 + len(s.clients) + len(s.grTmpClients) + len(s.routes) + len(s.leafs)
+	clientCnt := 1 + len(s.clients) + len(s.grTmpClients) + len(s.routes)
 	s.mu.Unlock()
-
-	s.gateway.RLock()
-	clientCnt += len(s.gateway.in) + len(s.gateway.outo)
-	s.gateway.RUnlock()
 
 	clients := make([]*client, 0, clientCnt)
 
@@ -1407,20 +1376,13 @@ func (s *Server) reloadClientTraceLevel() {
 		clients = append(clients, s.sys.client)
 	}
 
-	cMaps := []map[uint64]*client{s.clients, s.grTmpClients, s.routes, s.leafs}
+	cMaps := []map[uint64]*client{s.clients, s.grTmpClients, s.routes}
 	for _, m := range cMaps {
 		for _, c := range m {
 			clients = append(clients, c)
 		}
 	}
 	s.mu.Unlock()
-
-	s.gateway.RLock()
-	for _, c := range s.gateway.in {
-		clients = append(clients, c)
-	}
-	clients = append(clients, s.gateway.outo...)
-	s.gateway.RUnlock()
 
 	for _, c := range clients {
 		// client.trace is commonly read while holding the lock
@@ -1476,8 +1438,6 @@ func (s *Server) reloadAuthorization() {
 						newAcc.clients[c] = struct{}{}
 					}
 				}
-				// Same for leafnodes
-				newAcc.lleafs = append([]*client(nil), acc.lleafs...)
 
 				newAcc.sl = acc.sl
 				if acc.rm != nil {
@@ -1495,8 +1455,6 @@ func (s *Server) reloadAuthorization() {
 				// so need to copy this as well for proper accounting going forward.
 				newAcc.nrclients = acc.nrclients
 				newAcc.sysclients = acc.sysclients
-				newAcc.nleafs = acc.nleafs
-				newAcc.nrleafs = acc.nrleafs
 				// Process any reverse map entries.
 				if len(acc.imports.rrMap) > 0 {
 					newAcc.imports.rrMap = make(map[string][]*serviceRespEntry)
@@ -1592,7 +1550,7 @@ func (s *Server) reloadAuthorization() {
 		// Check for sysclients accounting, ignore the system account.
 		if acc.sysclients > 0 && (s.sys == nil || s.sys.account != acc) {
 			for c := range acc.clients {
-				if c.kind != CLIENT && c.kind != LEAF {
+				if c.kind != CLIENT {
 					clients = append(clients, c)
 				}
 			}
@@ -1620,7 +1578,7 @@ func (s *Server) reloadAuthorization() {
 	for _, c := range clients {
 		// Disconnect any unauthorized clients.
 		// Ignore internal clients.
-		if c.kind == CLIENT || c.kind == LEAF {
+		if c.kind == CLIENT {
 			c.authViolation()
 			continue
 		}

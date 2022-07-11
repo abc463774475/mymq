@@ -89,17 +89,7 @@ type Info struct {
 	InfoOnConnect bool `json:"info_on_connect,omitempty"` // When true the server will respond to CONNECT with an INFO
 	ConnectInfo   bool `json:"connect_info,omitempty"`    // When true this is the server INFO response to CONNECT
 
-	// Gateways Specific
-	Gateway           string   `json:"gateway,omitempty"`             // Name of the origin Gateway (sent by gateway's INFO)
-	GatewayURLs       []string `json:"gateway_urls,omitempty"`        // Gateway URLs in the originating cluster (sent by gateway's INFO)
-	GatewayURL        string   `json:"gateway_url,omitempty"`         // Gateway URL on that server (sent by route's INFO)
-	GatewayCmd        byte     `json:"gateway_cmd,omitempty"`         // Command code for the receiving server to know what to do
-	GatewayCmdPayload []byte   `json:"gateway_cmd_payload,omitempty"` // Command payload when needed
-	GatewayNRP        bool     `json:"gateway_nrp,omitempty"`         // Uses new $GNR. prefix for mapped replies
-
-	// LeafNode Specific
-	LeafNodeURLs  []string `json:"leafnode_urls,omitempty"`  // LeafNode URLs that the server can reconnect to.
-	RemoteAccount string   `json:"remote_account,omitempty"` // Lets the other side know the remote account that they bind to.
+	RemoteAccount string `json:"remote_account,omitempty"` // Lets the other side know the remote account that they bind to.
 }
 
 // Server is our main struct.
@@ -109,59 +99,47 @@ type Server struct {
 	// How often user logon fails due to the issuer account not being pinned.
 	pinnedAccFail uint64
 	stats
-	mu                  sync.RWMutex
-	kp                  nkeys.KeyPair
-	prand               *rand.Rand
-	info                Info
-	configFile          string
-	optsMu              sync.RWMutex
-	opts                *Options
-	running             bool
-	shutdown            bool
-	reloading           bool
-	listener            net.Listener
-	listenerErr         error
-	gacc                *Account
-	sys                 *internal
-	js                  *jetStream
-	accounts            sync.Map
-	tmpAccounts         sync.Map // Temporarily stores accounts that are being built
-	activeAccounts      int32
-	accResolver         AccountResolver
-	clients             map[uint64]*client
-	routes              map[uint64]*client
-	routesByHash        sync.Map
-	remotes             map[string]*client
-	leafs               map[uint64]*client
-	users               map[string]*User
-	nkeys               map[string]*NkeyUser
-	totalClients        uint64
-	closed              *closedRingBuffer
-	done                chan bool
-	start               time.Time
-	http                net.Listener
-	httpHandler         http.Handler
-	httpBasePath        string
-	profiler            net.Listener
-	httpReqStats        map[string]uint64
-	routeListener       net.Listener
-	routeListenerErr    error
-	routeInfo           Info
-	routeInfoJSON       []byte
-	routeResolver       netResolver
-	routesToSelf        map[string]struct{}
-	leafNodeListener    net.Listener
-	leafNodeListenerErr error
-	leafNodeInfo        Info
-	leafNodeInfoJSON    []byte
-	leafURLsMap         refCountedUrlSet
-	leafNodeOpts        struct {
-		resolver    netResolver
-		dialTimeout time.Duration
-	}
-	leafRemoteCfgs     []*leafNodeCfg
-	leafRemoteAccounts sync.Map
-	leafNodeEnabled    bool
+	mu             sync.RWMutex
+	kp             nkeys.KeyPair
+	prand          *rand.Rand
+	info           Info
+	configFile     string
+	optsMu         sync.RWMutex
+	opts           *Options
+	running        bool
+	shutdown       bool
+	reloading      bool
+	listener       net.Listener
+	listenerErr    error
+	gacc           *Account
+	sys            *internal
+	js             *jetStream
+	accounts       sync.Map
+	tmpAccounts    sync.Map // Temporarily stores accounts that are being built
+	activeAccounts int32
+	accResolver    AccountResolver
+	clients        map[uint64]*client
+	routes         map[uint64]*client
+	routesByHash   sync.Map
+	remotes        map[string]*client
+
+	users            map[string]*User
+	nkeys            map[string]*NkeyUser
+	totalClients     uint64
+	closed           *closedRingBuffer
+	done             chan bool
+	start            time.Time
+	http             net.Listener
+	httpHandler      http.Handler
+	httpBasePath     string
+	profiler         net.Listener
+	httpReqStats     map[string]uint64
+	routeListener    net.Listener
+	routeListenerErr error
+	routeInfo        Info
+	routeInfoJSON    []byte
+	routeResolver    netResolver
+	routesToSelf     map[string]struct{}
 
 	quitCh           chan struct{}
 	startupComplete  chan struct{}
@@ -190,11 +168,6 @@ type Server struct {
 	clientConnectURLsMap refCountedUrlSet
 
 	lastCURLsUpdate int64
-
-	// For Gateways
-	gatewayListener    net.Listener // Accept listener
-	gatewayListenerErr error
-	gateway            *srvGateway
 
 	// Used by tests to check that http.Servers do
 	// not set any timeout.
@@ -380,7 +353,6 @@ func NewServer(opts *Options) (*Server, error) {
 		routesToSelf:       make(map[string]struct{}),
 		httpReqStats:       make(map[string]uint64), // Used to track HTTP requests
 		rateLimitLoggingCh: make(chan time.Duration, 1),
-		leafNodeEnabled:    opts.LeafNode.Port != 0 || len(opts.LeafNode.Remotes) > 0,
 		syncOutSem:         make(chan struct{}, maxConcurrentSyncRequests),
 	}
 
@@ -401,7 +373,7 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// If we have solicited leafnodes but no clustering and no clustername.
 	// However we may need a stable clustername so use the server name.
-	if len(opts.LeafNode.Remotes) > 0 && opts.Cluster.Port == 0 && opts.Cluster.Name == _EMPTY_ {
+	if opts.Cluster.Port == 0 && opts.Cluster.Name == _EMPTY_ {
 		opts.Cluster.Name = opts.ServerName
 	}
 
@@ -438,21 +410,10 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// Used internally for quick look-ups.
 	s.clientConnectURLsMap = make(refCountedUrlSet)
-	s.leafURLsMap = make(refCountedUrlSet)
-
-	// Ensure that non-exported options (used in tests) are properly set.
-	s.setLeafNodeNonExportedOptions()
 
 	// Setup OCSP Stapling. This will abort server from starting if there
 	// are no valid staples and OCSP policy is to Always or MustStaple.
 	if err := s.enableOCSP(); err != nil {
-		return nil, err
-	}
-
-	// Call this even if there is no gateway defined. It will
-	// initialize the structure so we don't have to check for
-	// it to be nil or not in various places in the code.
-	if err := s.newGateway(opts); err != nil {
 		return nil, err
 	}
 
@@ -483,9 +444,6 @@ func NewServer(opts *Options) (*Server, error) {
 	// For tracking routes and their remote ids
 	s.routes = make(map[uint64]*client)
 	s.remotes = make(map[string]*client)
-
-	// For tracking leaf nodes.
-	s.leafs = make(map[uint64]*client)
 
 	// Used to kick out all go routines possibly waiting on server
 	// to shutdown.
@@ -591,15 +549,7 @@ func (s *Server) setClusterName(name string) {
 
 	// Regenerate the info byte array
 	s.generateRouteInfoJSON()
-	// Need to close solicited leaf nodes. The close has to be done outside of the server lock.
-	var leafs []*client
-	for _, c := range s.leafs {
-		c.mu.Lock()
-		if c.leaf != nil && c.leaf.remote != nil {
-			leafs = append(leafs, c)
-		}
-		c.mu.Unlock()
-	}
+
 	s.mu.Unlock()
 
 	// Also place into mapping cn with cnMu lock.
@@ -607,9 +557,6 @@ func (s *Server) setClusterName(name string) {
 	s.cn = name
 	s.cnMu.Unlock()
 
-	for _, l := range leafs {
-		l.closeConnection(ClusterNameConflict)
-	}
 	if resetCh != nil {
 		resetCh <- struct{}{}
 	}
@@ -642,14 +589,7 @@ func validateCluster(o *Options) error {
 	if err := validatePinnedCerts(o.Cluster.TLSPinnedCerts); err != nil {
 		return fmt.Errorf("cluster: %v", err)
 	}
-	// Check that cluster name if defined matches any gateway name.
-	if o.Gateway.Name != "" && o.Gateway.Name != o.Cluster.Name {
-		if o.Cluster.Name != "" {
-			return ErrClusterNameConfigConflict
-		}
-		// Set this here so we do not consider it dynamic.
-		o.Cluster.Name = o.Gateway.Name
-	}
+
 	return nil
 }
 
@@ -674,17 +614,6 @@ func validateOptions(o *Options) error {
 			o.MaxPayload, o.MaxPending)
 	}
 
-	// Check on leaf nodes which will require a system
-	// account when gateways are also configured.
-	if err := validateLeafNode(o); err != nil {
-		return err
-	}
-
-	// Check that gateway is properly configured. Returns no error
-	// if there is no gateway defined.
-	if err := validateGatewayOptions(o); err != nil {
-		return err
-	}
 	// Check that cluster name if defined matches any gateway name.
 	if err := validateCluster(o); err != nil {
 		return err
@@ -939,7 +868,7 @@ func (s *Server) globalAccountOnly() bool {
 // Determines if this server is in standalone mode, meaning no routes or gateways.
 func (s *Server) standAloneMode() bool {
 	opts := s.getOpts()
-	return opts.Cluster.Port == 0 && opts.Gateway.Port == 0
+	return opts.Cluster.Port == 0
 }
 
 func (s *Server) configuredRoutes() int {
@@ -1310,7 +1239,7 @@ func (s *Server) createInternalClient(kind int) *client {
 // efficient propagation.
 // Lock should be held on entry.
 func (s *Server) shouldTrackSubscriptions() bool {
-	return (s.opts.Cluster.Port != 0 || s.opts.Gateway.Port != 0)
+	return (s.opts.Cluster.Port != 0)
 }
 
 // Invokes registerAccountNoLock under the protection of the server lock.
@@ -1713,10 +1642,6 @@ func (s *Server) Start() {
 		}
 	}
 
-	// Start expiration of mapped GW replies, regardless if
-	// this server is configured with gateway or not.
-	s.startGWReplyMapExpiration()
-
 	// Check if JetStream has been enabled. This needs to be after
 	// the system account setup above. JetStream will create its
 	// own system account if one is not present.
@@ -1773,25 +1698,6 @@ func (s *Server) Start() {
 
 	// Start OCSP Stapling monitoring for TLS certificates if enabled.
 	s.startOCSPMonitoring()
-
-	// Start up gateway if needed. Do this before starting the routes, because
-	// we want to resolve the gateway host:port so that this information can
-	// be sent to other routes.
-	if opts.Gateway.Port != 0 {
-		s.startGateways()
-	}
-
-	// Start up listen if we want to accept leaf node connections.
-	if opts.LeafNode.Port != 0 {
-		// Will resolve or assign the advertise address for the leafnode listener.
-		// We need that in StartRouting().
-		s.startLeafNodeAcceptLoop()
-	}
-
-	// Solicit remote servers for leaf node connections.
-	if len(opts.LeafNode.Remotes) > 0 {
-		s.solicitLeafNodeRemotes(opts.LeafNode.Remotes)
-	}
 
 	// TODO (ik): I wanted to refactor this by starting the client
 	// accept loop first, that is, it would resolve listen spec
@@ -1893,13 +1799,6 @@ func (s *Server) Shutdown() {
 	for i, r := range s.routes {
 		conns[i] = r
 	}
-	// Copy off the gateways
-	s.getAllGatewayConnections(conns)
-
-	// Copy off the leaf nodes
-	for i, c := range s.leafs {
-		conns[i] = c
-	}
 
 	// Number of done channel responses we expect.
 	doneExpected := 0
@@ -1911,25 +1810,11 @@ func (s *Server) Shutdown() {
 		s.listener = nil
 	}
 
-	// Kick leafnodes AcceptLoop()
-	if s.leafNodeListener != nil {
-		doneExpected++
-		s.leafNodeListener.Close()
-		s.leafNodeListener = nil
-	}
-
 	// Kick route AcceptLoop()
 	if s.routeListener != nil {
 		doneExpected++
 		s.routeListener.Close()
 		s.routeListener = nil
-	}
-
-	// Kick Gateway AcceptLoop()
-	if s.gatewayListener != nil {
-		doneExpected++
-		s.gatewayListener.Close()
-		s.gatewayListener = nil
 	}
 
 	// Kick HTTP monitoring if its running
@@ -2223,8 +2108,6 @@ const (
 	VarzPath     = "/varz"
 	ConnzPath    = "/connz"
 	RoutezPath   = "/routez"
-	GatewayzPath = "/gatewayz"
-	LeafzPath    = "/leafz"
 	SubszPath    = "/subsz"
 	StackszPath  = "/stacksz"
 	AccountzPath = "/accountz"
@@ -2321,10 +2204,6 @@ func (s *Server) startMonitoring(secure bool) error {
 	mux.HandleFunc(s.basePath(ConnzPath), s.HandleConnz)
 	// Routez
 	mux.HandleFunc(s.basePath(RoutezPath), s.HandleRoutez)
-	// Gatewayz
-	mux.HandleFunc(s.basePath(GatewayzPath), s.HandleGatewayz)
-	// Leafz
-	mux.HandleFunc(s.basePath(LeafzPath), s.HandleLeafz)
 	// Subz
 	mux.HandleFunc(s.basePath(SubszPath), s.HandleSubsz)
 	// Subz alias for backwards compatibility
@@ -2736,11 +2615,13 @@ func (s *Server) removeClient(c *client) {
 		s.mu.Unlock()
 	case ROUTER:
 		s.removeRoute(c)
-	case GATEWAY:
-		s.removeRemoteGatewayConnection(c)
-	case LEAF:
-		s.removeLeafNodeConnection(c)
 	}
+}
+
+// Store this route in map with the key being the remote server's name hash
+// and the remote server's ID hash used by gateway replies mapping routing.
+func (s *Server) storeRouteByHash(srvNameHash, srvIDHash string, c *client) {
+	s.routesByHash.Store(srvNameHash, c)
 }
 
 func (s *Server) removeFromTempClients(cid uint64) {
@@ -2779,13 +2660,6 @@ func (s *Server) NumRemotes() int {
 	return len(s.remotes)
 }
 
-// NumLeafNodes will report number of leaf node connections.
-func (s *Server) NumLeafNodes() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.leafs)
-}
-
 // NumClients will report the number of registered clients.
 func (s *Server) NumClients() int {
 	s.mu.RLock()
@@ -2803,13 +2677,6 @@ func (s *Server) getClient(cid uint64) *client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.clients[cid]
-}
-
-// GetLeafNode returns the leafnode associated with the cid.
-func (s *Server) GetLeafNode(cid uint64) *client {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.leafs[cid]
 }
 
 // NumSubscriptions will report how many subscriptions are active.
@@ -2900,8 +2767,6 @@ func (s *Server) readyForConnections(d time.Duration) error {
 		s.mu.RLock()
 		chk["server"] = info{ok: s.listener != nil || opts.DontListen, err: s.listenerErr}
 		chk["route"] = info{ok: (opts.Cluster.Port == 0 || s.routeListener != nil), err: s.routeListenerErr}
-		chk["gateway"] = info{ok: (opts.Gateway.Name == _EMPTY_ || s.gatewayListener != nil), err: s.gatewayListenerErr}
-		chk["leafNode"] = info{ok: (opts.LeafNode.Port == 0 || s.leafNodeListener != nil), err: s.leafNodeListenerErr}
 
 		s.mu.RUnlock()
 
@@ -3568,11 +3433,6 @@ func (s *Server) shouldReportConnectErr(firstConnect bool, attempts int) bool {
 
 func (s *Server) updateRemoteSubscription(acc *Account, sub *subscription, delta int32) {
 	s.updateRouteSubscriptionMap(acc, sub, delta)
-	if s.gateway.enabled {
-		s.gatewayUpdateSubInterest(acc.Name, sub, delta)
-	}
-
-	s.updateLeafNodes(acc, sub, delta)
 }
 
 func (s *Server) startRateLimitLogExpiration() {
