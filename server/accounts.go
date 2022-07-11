@@ -50,13 +50,14 @@ var maxSubLimitReportThreshold = defaultMaxSubLimitReportThreshold
 // You can share via Exports and Imports of Streams and Services.
 type Account struct {
 	stats
-	Name       string
-	Nkey       string
-	Issuer     string
-	claimJWT   string
-	updated    time.Time
-	mu         sync.RWMutex
-	sqmu       sync.Mutex
+	Name     string
+	Nkey     string
+	Issuer   string
+	claimJWT string
+	updated  time.Time
+	mu       sync.RWMutex
+	sqmu     sync.Mutex
+	// sl sublist for all subscriptions ,所以Account 是绝对不能删除的
 	sl         *Sublist
 	ic         *client
 	isid       uint64

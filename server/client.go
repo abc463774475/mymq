@@ -19,6 +19,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	nlog "github.com/abc463774475/my_tool/n_log"
 	"io"
 	"math/rand"
 	"net"
@@ -986,6 +987,14 @@ func (c *client) readLoop(pre []byte) {
 		}
 		{
 			bufs[0] = b[:n]
+		}
+
+		if strings.Contains(string(bufs[0]), "SUB") {
+			nlog.Erro("bufs: \n%v", string(bufs[0]))
+		}
+
+		if strings.Contains(string(bufs[0]), "PUB") {
+			nlog.Erro("pub bufs: \n%v", string(bufs[0]))
 		}
 
 		// Check if the account has mappings and if so set the local readcache flag.
@@ -2022,6 +2031,7 @@ func (c *client) processHeaderPub(arg []byte) error {
 	return nil
 }
 
+// processPub process Publish commands.
 func (c *client) processPub(arg []byte) error {
 	// Unroll splitArgs to avoid runtime/heap issues
 	a := [MAX_PUB_ARGS][]byte{}
@@ -3035,6 +3045,9 @@ func (c *client) processInboundMsg(msg []byte) {
 	case CLIENT:
 		c.processInboundClientMsg(msg)
 	case ROUTER:
+		if len(msg) < 100 {
+			nlog.Debug("recv router msg  %v", string(msg))
+		}
 		c.processInboundRoutedMsg(msg)
 	}
 }
@@ -3551,6 +3564,10 @@ func (c *client) processMsgResults(acc *Account, r *SublistResult, msg, deliver,
 	subj := subject
 	if len(deliver) > 0 {
 		subj = deliver
+	}
+
+	if !strings.Contains(string(subj), "SYS.SERVER") {
+		nlog.Info("processMsgResults: subj: %s", string(subj))
 	}
 
 	// Check for JetStream encoded reply subjects.

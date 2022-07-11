@@ -17,6 +17,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	nlog "github.com/abc463774475/my_tool/n_log"
 	"net/http"
 	"net/textproto"
 )
@@ -479,6 +480,7 @@ func (c *client) parse(buf []byte) error {
 				c.traceMsg(c.msgBuf)
 			}
 
+			// pub 收到整个的地方
 			c.processInboundMsg(c.msgBuf)
 			c.argBuf, c.msgBuf, c.header = nil, nil, nil
 			c.drop, c.as, c.state = 0, i+1, OP_START
@@ -628,6 +630,7 @@ func (c *client) parse(buf []byte) error {
 					if trace {
 						c.traceInOp("SUB", arg)
 					}
+					// parseSub 解析订阅参数，主要在这儿，，消息
 					err = c.parseSub(arg, false)
 				case ROUTER:
 					switch c.op {
@@ -755,6 +758,8 @@ func (c *client) parse(buf []byte) error {
 						c.traceInOp("UNSUB", arg)
 					}
 					err = c.processUnsub(arg)
+
+					nlog.Erro("remote unsub client %v", string(arg))
 				case ROUTER:
 					if trace && c.srv != nil {
 						switch c.op {
@@ -764,8 +769,8 @@ func (c *client) parse(buf []byte) error {
 							c.traceInOp("LS-", arg)
 						}
 					}
+					nlog.Erro("remote unsub router %v", string(arg))
 					err = c.processRemoteUnsub(arg)
-
 				}
 				if err != nil {
 					return err

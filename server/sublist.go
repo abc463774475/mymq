@@ -55,7 +55,9 @@ const (
 
 // SublistResult is a result structure better optimized for queue subs.
 type SublistResult struct {
+	// psubs is a list of plain subscribers.
 	psubs []*subscription
+	// qsubs is a list of queue subscribers.
 	qsubs [][]*subscription // don't make this a map, too expensive to iterate
 }
 

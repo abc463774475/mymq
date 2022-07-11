@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	nlog "github.com/abc463774475/my_tool/n_log"
 )
 
 // RouteType designates the router type
@@ -1109,7 +1111,7 @@ func (c *client) sendRouteUnSubProtos(subs []*subscription, trace bool, filter f
 // Low-level function that sends RS+ or RS- protocols for the given subscriptions.
 // This can now also send LS+ and LS- for origin cluster based leafnode subscriptions for cluster no-echo.
 // Use sendRouteSubProtos or sendRouteUnSubProtos instead for clarity.
-// Lock is held on entry.
+// Lock is held on entry. 更新路由订阅, 发送订阅协议
 func (c *client) sendRouteSubOrUnSubProtos(subs []*subscription, isSubProto, trace bool, filter func(sub *subscription) bool) {
 	var (
 		_buf [1024]byte
@@ -1367,6 +1369,7 @@ func keyFromSub(sub *subscription) string {
 // updateRouteSubscriptionMap will make sure to update the route map for the subscription. Will
 // also forward to all routes if needed.
 func (s *Server) updateRouteSubscriptionMap(acc *Account, sub *subscription, delta int32) {
+	nlog.Info("updateRouteSubscriptionMap  %v   %v", acc, sub)
 	if acc == nil || sub == nil {
 		return
 	}
